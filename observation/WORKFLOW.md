@@ -133,6 +133,23 @@ wall seconds. If the clock stops during collection, the window becomes
 
 ## Candidate → confirmed failure and guidance
 
+The authenticated web flow can now initiate the same capture with a
+revision-bound `report_incident` command. The workflow connector resolves the
+currently active observer session and publishes the capture request locally;
+the browser never supplies the ROS timestamps. The default UI window retains
+10 seconds before and 3 seconds after the edge mark. Its snapshot progresses
+through `incident_requests.<window-id>` from `collecting` to
+`preparing_evidence` and `ready`, at which point the linked candidate can be
+reviewed. The stable cloud request ID is persisted with the edge window before
+acknowledgement, so connector retries recover that same mark instead of
+creating a second window; completed commands also replay their durable receipt.
+
+During acceptance the operator can pass `proposition_id` to attach the exact
+window to an existing proposition, or `new_proposition` with an ID and
+description to create and attach one atomically. The generated proposition
+scope uses the profile's required bound modality roles; its timing defaults are
+conservative placeholders that remain subject to later profile refinement.
+
 The native workflow also supports proposition definitions before any failure
 exists. `workflow apply --operation add_proposition` accepts a payload such as:
 

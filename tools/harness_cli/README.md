@@ -468,17 +468,24 @@ CLI writes the device ID and its random credential to
 `$XDG_CONFIG_HOME/rearguard/device.json` (or
 `~/.config/rearguard/device.json`) with mode `0600`. The database stores only a
 SHA-256 digest of that credential. `--name <device-name>` overrides the Linux
-hostname. Immediately after approval, `connect` scans ROS domain IDs 0 through
-232 and uploads a start record, each parallel domain-batch result, and the
-terminal inventory. Pairing, credential storage, discovery progress, and cloud
-sync are displayed as one numbered interactive flow. The setup page can
-therefore update before the sweep is finished. `--scan-parallelism` (1..32)
-and `--scan-settle-ms` (0..10000) tune
-the sweep; `--json` emits newline-delimited pairing and scan progress records.
-Setup advances and the background service starts only after the scan finds at
-least one active ROS 2 domain and captures one topic sample. If either is
-missing, start the robot software or simulation and run `rearguard connect`
-again; the failed inventory remains available for diagnosis.
+hostname. Immediately after approval, `connect` performs two distinct discovery
+phases. A short parallel sweep across ROS domain IDs 0 through 232 locates
+candidate domains but does not supply the final graph inventory. Each candidate
+is then scanned again in isolation for at least five seconds; only that thorough
+single-context result is uploaded as the authoritative inventory used by setup.
+The quick and thorough snapshots are never combined. If the thorough scan cannot
+reproduce a candidate domain, setup fails instead of presenting the quick scan's
+partial graph.
+
+Pairing, credential storage, discovery progress, and cloud sync are displayed as
+one numbered interactive flow. `--scan-parallelism` (1..32) and
+`--scan-settle-ms` (0..10000) tune the locator sweep; a larger settle value also
+raises the thorough scan above its five-second minimum. `--json` emits
+newline-delimited pairing and scan progress records. Setup advances and the
+background service starts only after the authoritative scan finds at least one
+active ROS 2 domain and captures one topic sample. If either is missing, start
+the robot software or simulation and run `rearguard connect` again; the failed
+inventory remains available for diagnosis.
 
 ---
 

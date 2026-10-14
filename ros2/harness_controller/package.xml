@@ -8,7 +8,7 @@
     kernel's C ABI (edge/include/harness_kernel.h). Owns no safety logic — every
     predicate evaluation happens inside harness_project(), so the binary
     validated by this package's plugin-load test is the binary that ships.
-    Stage 1 rehearsal rig only; see sim/gazebo_rig.
+    Stage 1 rehearsal rig only; see robot/sim/gazebo_rig.
   </description>
   <maintainer email="karvouniarisalex@gmail.com">retry.world</maintainer>
   <license>proprietary</license>

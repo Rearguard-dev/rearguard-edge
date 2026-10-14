@@ -91,7 +91,7 @@ configuration, **not** a kernel `HarnessProfile` and cannot be passed to
 **Terminal 2: run the policy and simulator.**
 
 ```bash
-./sim/robot_bench/run.sh --robot so101 --task pick_place \
+./robot/sim/robot_bench/run.sh --robot so101 --task pick_place \
   --domain-id 71 --headless --record
 ```
 
@@ -114,7 +114,7 @@ Wait until all four topics have publishers and increasing message counts.
 the pick:
 
 ```bash
-./sim/robot_bench/perturb.sh push_object
+./robot/sim/robot_bench/perturb.sh push_object
 "$CLI" observe capture --session "$SESSION" --before 5 --after 3 \
   --label "Inspect the pick attempt around the observed cube displacement"
 "$CLI" observe windows --session "$SESSION"

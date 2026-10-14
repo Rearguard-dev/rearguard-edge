@@ -330,7 +330,7 @@ commit makes every threshold derived with it unfalsifiable. It also fails if
 Publish `dist/` to `HARNESS_ARTIFACT_BASE_URL/<version>/`, then set:
 
 ```
-sim/sim_rig/config.py::EDGE_ARTIFACT_VERSION = "0.1.0"
+robot/sim/sim_rig/config.py::EDGE_ARTIFACT_VERSION = "0.1.0"
 ```
 
 and re-run `make gate-conformance`. A kernel change can move a gate verdict,
@@ -373,9 +373,9 @@ ABI itself changed shape, so every consumer does need to re-integrate.
 
 - **`ros2/harness_controller/`** — ported. Holds an `hk_handle`, calls `hk_gate`
   in `update_and_write_commands`, drains the event ring same-cycle via a
-  realtime-safe raw-bytes republish. Not yet wired into `sim/gazebo_rig`'s
+  realtime-safe raw-bytes republish. Not yet wired into `robot/sim/gazebo_rig`'s
   colcon workspace.
-- **`python-client/`** and the sim rig's kernel bindings (`sim/sim_rig/`) —
+- **`python-client/`** and the sim rig's kernel bindings (`robot/sim/sim_rig/`) —
   **not ported.** Still call the v1 `harness_project_batch` surface. Treat as
   broken until that work lands.
 

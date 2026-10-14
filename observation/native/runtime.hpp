@@ -10,6 +10,7 @@ struct Detection {
   std::string source = "trained_critic";
   std::string deployment_id;
   bool deployment_validated = false;
+  std::string proposition_id;
   Detection() = default;
   Detection(std::string detector, std::string evidence, double score,
             double before = 5, double after = 2,
@@ -24,6 +25,7 @@ struct Detection {
             {"confidence", confidence},   {"before_s", before_s},
             {"after_s", after_s},         {"source", source},
             {"deployment_id", deployment_id},
+            {"proposition_id", proposition_id},
             {"deployment_validated", deployment_validated}};
   }
 };
@@ -83,6 +85,9 @@ class Runtime {
   double deadline_ = 0;
   int retries_ = 0;
   bool last_match_ = false;
+  bool authority_requested_ = false;
+  std::string proposition_id_;
+  void validate_authorization(const Json &snapshot) const;
   void record_enforcement(const std::string &outcome, const Json &detail,
                           bool terminal);
 

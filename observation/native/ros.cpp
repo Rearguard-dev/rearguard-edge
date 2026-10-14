@@ -168,6 +168,12 @@ public:
     const auto evaluation_started = monotonic_ns();
     for (std::size_t i = 0; i < deployment_["heads"].size(); ++i) {
       const auto &head = deployment_["heads"][i];
+      if (head["centers"].empty()) {
+        telemetry_["scores"][head["proposition_id"].get<std::string>()] =
+            {{"status", "unknown"}, {"probability", nullptr},
+             {"reason", "no_usable_examples"}};
+        continue;
+      }
       const auto period = static_cast<Ns>(std::llround(
           1e9 / head["scope"]["required_hz"].get<double>()));
       if (last_evaluation_[i] < 0 ||
@@ -444,9 +450,11 @@ class Observer {
       const auto op = data.at("operation").get<std::string>();
       if (op == "capture") {
         evidence_.check_live();
-        result = evidence_.capture(
+        auto &window = evidence_.capture(
             data.at("before").get<double>(), data.at("after").get<double>(),
             required_text(data.at("label"), "label").substr(0, 2000));
+        window["capture_request_id"] = key;
+        result = window;
       } else if (op == "candidate")
         result = candidate({{"detector_id", data.at("detector_id")},
                             {"evidence_class", data.at("evidence_class")},
@@ -1290,23 +1298,11 @@ Json ros_discover(const Options &options) {
   result["inventory_hash"] = digest(result);
   return result;
 }
-Json ros_request(const Options &options, const Json &meta) {
-  Json data = {{"schema_version", 1},
-               {"request_id", unique_id()},
-               {"operation", options.command}};
-  if (options.command == "capture" || options.command == "candidate") {
-    data.update({{"before", options.number("--before", 5)},
-                 {"after", options.number("--after", 3)},
-                 {"label", options.get("--label", "critic candidate")}});
-    if (options.command == "candidate")
-      data.update(
-          {{"detector_id", options.get("--detector-id", "manual-adapter-test")},
-           {"evidence_class", options.need("--evidence-class")},
-           {"confidence", options.number("--confidence", -1)}});
-  } else if (options.command == "promote")
-    data.update({{"window_id", options.need("--window")},
-                 {"description", options.need("--description")},
-                 {"operator", options.need("--operator")}});
+Json ros_request_payload(const Json &data, const Json &meta) {
+  require(data.is_object() && data.value("schema_version", 0) == 1,
+          "ROS request requires schema_version 1");
+  required_text(data.at("request_id"), "request_id");
+  required_text(data.at("operation"), "operation");
   RosContext context(meta.at("domain_id").get<Ns>());
   rclcpp::NodeOptions node_options;
   node_options.context(context.value);
@@ -1341,6 +1337,29 @@ Json ros_request(const Options &options, const Json &meta) {
   }
   require(!response.is_null(), "no observer acknowledgement in 15 seconds; "
                                "inspect state before retrying");
-  return response;
+  require(response.value("ok", false),
+          response.value("error", "observer rejected incident capture"));
+  return response.at("result");
+}
+
+Json ros_request(const Options &options, const Json &meta) {
+  Json data = {{"schema_version", 1},
+               {"request_id", unique_id()},
+               {"operation", options.command}};
+  if (options.command == "capture" || options.command == "candidate") {
+    data.update({{"before", options.number("--before", 5)},
+                 {"after", options.number("--after", 3)},
+                 {"label", options.get("--label", "critic candidate")}});
+    if (options.command == "candidate")
+      data.update(
+          {{"detector_id", options.get("--detector-id", "manual-adapter-test")},
+           {"evidence_class", options.need("--evidence-class")},
+           {"confidence", options.number("--confidence", -1)}});
+  } else if (options.command == "promote")
+    data.update({{"window_id", options.need("--window")},
+                 {"description", options.need("--description")},
+                 {"operator", options.need("--operator")}});
+  return {{"schema_version", 1}, {"request_id", data["request_id"]},
+          {"ok", true}, {"result", ros_request_payload(data, meta)}};
 }
 } // namespace harness::observation

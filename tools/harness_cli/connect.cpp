@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -280,6 +281,60 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
                 std::fflush(stdout);
             }
         }
+
+        // The broad parallel sweep is only a domain locator. Do not use its
+        // partial graph snapshots as inventory: different DDS participants can
+        // become visible at different points in that short window. Re-scan each
+        // candidate domain in isolation and make that longer, single-context
+        // result the sole authoritative inventory.
+        std::set<int> confirmation_domains;
+        for (const auto& id : inventory["available_domain_ids"])
+            if (id.is_number_integer()) confirmation_domains.insert(id.get<int>());
+        if (const char* configured = std::getenv("ROS_DOMAIN_ID")) {
+            char* end = nullptr;
+            errno = 0;
+            const long value = std::strtol(configured, &end, 10);
+            if (errno == 0 && end != configured && *end == '\0' &&
+                value >= kFirstDomain && value <= kLastDomain)
+                confirmation_domains.insert(static_cast<int>(value));
+        }
+        const int confirmation_settle_ms = std::max(options.scan_settle_ms, 5000);
+        inventory["scan"]["mode"] = "locate_then_inventory";
+        inventory["scan"]["locator"] = {
+            {"domain_min", kFirstDomain},
+            {"domain_max", kLastDomain},
+            {"settle_ms", options.scan_settle_ms},
+            {"parallelism", batch_size}};
+        inventory["scan"]["inventory"] = {
+            {"settle_ms", confirmation_settle_ms},
+            {"parallelism", 1},
+            {"candidate_domain_ids", Json::array()}};
+        for (const int domain_id : confirmation_domains)
+            inventory["scan"]["inventory"]["candidate_domain_ids"].push_back(domain_id);
+        Json confirmed_domains = Json::array();
+        for (const int domain_id : confirmation_domains) {
+            if (!options.json) {
+                std::printf("\r\033[K    Verifying active domain %d · %d ms thorough scan\n",
+                            domain_id, confirmation_settle_ms);
+                std::fflush(stdout);
+            }
+            auto confirmation_options =
+                scan_options(domain_id, domain_id, confirmation_settle_ms, 1);
+            auto confirmation = harness::observation::ros_discover(confirmation_options);
+            if (!confirmation.contains("domains") || confirmation["domains"].empty())
+                continue;
+            for (const auto& confirmed_domain : confirmation["domains"])
+                confirmed_domains.push_back(confirmed_domain);
+        }
+        inventory["domains"] = std::move(confirmed_domains);
+        std::set<int> available_domains;
+        for (const auto& domain : inventory["domains"])
+            if (domain.contains("domain_id") && domain["domain_id"].is_number_integer())
+                available_domains.insert(domain["domain_id"].get<int>());
+        inventory["available_domain_ids"] = Json::array();
+        for (const int domain_id : available_domains)
+            inventory["available_domain_ids"].push_back(domain_id);
+
         inventory["captured_wall_ns"] = harness::observation::wall_ns();
         inventory["inventory_hash"] = harness::observation::digest(inventory);
         const auto service_directory = harness::observation::state_root() / "service";

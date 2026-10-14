@@ -1,6 +1,27 @@
 #include "runtime.hpp"
 #include <cmath>
 namespace harness::observation {
+void Runtime::validate_authorization(const Json &s) const {
+  require(!deployment_id_.is_null() && s.at("installed_deployment") == deployment_id_,
+          "installed deployment changed; explicit reactivation required");
+  const auto &d = s.at("deployments").at(deployment_id_.get<std::string>());
+  const auto &b = s.at("bundles").at(d.at("bundle_id").get<std::string>());
+  const auto &f = s.at("failures").at(d.at("failure_id").get<std::string>());
+  require(!proposition_id_.empty() && f.value("proposition_id", "") == proposition_id_,
+          "accepted failure proposition required");
+  const auto &p = s.at("propositions").at(proposition_id_);
+  const auto &link = p.at("recovery");
+  require(link.is_object() && link.at("bundle_id") == b.at("id") &&
+              link.at("content_hash") == b.at("content_hash"),
+          "proposition requires an attached approved recovery");
+  require(b.at("status") == "approved" && b.at("failure_id") == d.at("failure_id") &&
+              b.at("guidance_revision") == f.at("guidance_revision") &&
+              b.at("content_hash") == deployment_content_hash_ &&
+              d.at("content_hash") == deployment_content_hash_ &&
+              digest(b.at("content")) == deployment_content_hash_ &&
+              b.at("content").at("binding_hash") == s.at("binding_hash"),
+          "recovery approval is stale or does not match deployment");
+}
 Json Runtime::activate() {
   require(status == "disabled" || status == "blocked",
           "deactivate runtime before activation");
@@ -16,6 +37,12 @@ Json Runtime::activate() {
       s["deployments"].at(s["installed_deployment"].get<std::string>());
   const auto &b = s["bundles"].at(d["bundle_id"].get<std::string>());
   require(b["status"] == "approved", "deployment not approved");
+  deployment_id_ = d.at("id");
+  failure_id_ = d.at("failure_id");
+  deployment_content_hash_ = d.at("content_hash").get<std::string>();
+  proposition_id_ = s.at("failures").at(failure_id_.get<std::string>())
+                        .value("proposition_id", "");
+  validate_authorization(s);
   const auto &content = b["content"];
   require(
       critic_.load(store_.verify_artifact(content["critic"], "critic_model"),
@@ -32,12 +59,14 @@ Json Runtime::activate() {
   enforcement_event_id_.clear();
   enforcement_started_wall_ns_ = 0;
   last_match_ = false;
+  authority_requested_ = false;
   status = "nominal";
   return snapshot();
 }
 Json Runtime::snapshot() const {
   return {{"status", status},
           {"deployment_id", deployment_id_},
+          {"proposition_id", proposition_id_},
           {"critic_ready", critic_.ready()},
           {"controller_ready", controller_.ready()},
           {"enforcement_event_id", enforcement_event_id_.empty()
@@ -69,6 +98,14 @@ void Runtime::record_enforcement(const std::string &outcome,
   }
 }
 Json Runtime::fallback(const std::string &reason) {
+  // Monitoring failures do not authorize actuator intervention. Only a matched,
+  // approved proposition may initiate authority acquisition (including hold).
+  if (!authority_requested_) {
+    status = "blocked";
+    auto result = snapshot();
+    result.update({{"kind", "blocked"}, {"reason", reason}});
+    return result;
+  }
   bool held = false;
   try {
     held = controller_.hold(reason);
@@ -106,9 +143,7 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
     return result;
   };
   try {
-    if (store_.snapshot()["installed_deployment"] != deployment_id_)
-      return fallback(
-          "installed deployment changed; explicit reactivation required");
+    validate_authorization(store_.snapshot());
     if (!fresh || !std::isfinite(now))
       return fallback("observations or clock stale");
     if (status == "recovering") {
@@ -118,6 +153,7 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
       if (outcome == "succeeded") {
         if (!controller_.resume())
           return fallback("nominal reentry not acknowledged");
+        authority_requested_ = false;
         status = "nominal";
         auto result = event("recovery_completed");
         record_enforcement("completed", result, true);
@@ -143,12 +179,17 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
       return fallback("invalid critic confidence");
     const bool match =
         detection &&
+        detection->source == "trained_critic" &&
+        detection->deployment_validated &&
+        detection->deployment_id == deployment_id_.get<std::string>() &&
+        detection->proposition_id == proposition_id_ &&
         detection->evidence_class ==
             contract_["evidence_class"].get<std::string>() &&
         detection->confidence >= contract_["confidence_min"].get<double>();
     const bool rising = match && !last_match_;
     last_match_ = match;
     if (rising) {
+      authority_requested_ = true;
       if (!controller_.begin())
         return fallback("recovery authority not acknowledged");
       status = "recovering";

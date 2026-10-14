@@ -5,7 +5,7 @@ from any package; every package generates from here.
 
 ```
 proto/harness/v1/enforcement.proto
-  ├─→ sim/sim_rig/schemas/enforcement_pb2.py    protobuf-python   [wired]
+  ├─→ robot/sim/sim_rig/schemas/enforcement_pb2.py    protobuf-python   [wired]
   ├─→ backend/                                       shares the _pb2   [wired]
   ├─→ edge/src/generated/                            protoc --cpp_out  [stub]
   └─→ app/src/lib/generated/                        ts-proto          [stub]
@@ -29,7 +29,7 @@ to a customer is read back by a decoder that may be older than the writer.
 ## Not yet here
 
 The Harness Profile itself, and the replay tuple. Both are currently Python
-dataclasses in `sim/sim_rig/`, which is fine while `sim/` is the only writer
+dataclasses in `robot/sim/sim_rig/`, which is fine while `robot/sim/` is the only writer
 and wrong the moment the edge kernel or the registry needs them. The natural home is a
 JSON Schema definition here, generating C++ (or a hand-written reader, as the
 profile parser already is), Pydantic and TypeScript.

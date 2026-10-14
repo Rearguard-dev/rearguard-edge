@@ -1,6 +1,7 @@
 #pragma once
 
 #include "store.hpp"
+#include <functional>
 
 namespace harness::observation {
 
@@ -21,14 +22,17 @@ public:
 
 class WorkflowConnector {
 public:
+  using IncidentCapture = std::function<Json(const Json &)>;
   WorkflowConnector(Store store, std::string robot_id,
-                    WorkflowTransport &transport);
+                    WorkflowTransport &transport,
+                    IncidentCapture incident_capture = {});
   Json cycle(bool heartbeat = false);
 
 private:
   Store store_;
   std::string robot_id_;
   WorkflowTransport &transport_;
+  IncidentCapture incident_capture_;
   Ns uploaded_revision_ = -1;
   Ns last_upload_monotonic_ns_ = 0;
 };

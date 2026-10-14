@@ -2,7 +2,7 @@
 #
 # The harness kernel itself is NOT vendored or rebuilt by this CMakeLists: per
 # the build brief's non-negotiable #5, the kernel is built inside the
-# container from sim/gazebo_rig's caller (which calls
+# container from robot/sim/gazebo_rig's caller (which calls
 # harness_client.build.ensure_kernel(), the existing source-hash cache), and
 # this package is pointed at that build's output via two cache variables:
 #

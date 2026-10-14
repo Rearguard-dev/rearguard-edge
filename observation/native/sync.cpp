@@ -167,9 +167,10 @@ private:
 } // namespace
 
 WorkflowConnector::WorkflowConnector(Store store, std::string robot_id,
-                                     WorkflowTransport &transport)
+                                     WorkflowTransport &transport,
+                                     IncidentCapture incident_capture)
     : store_(std::move(store)), robot_id_(std::move(robot_id)),
-      transport_(transport) {
+      transport_(transport), incident_capture_(std::move(incident_capture)) {
   require(uuid_like(robot_id_), "--robot-id must be a UUID");
 }
 
@@ -194,7 +195,22 @@ Json WorkflowConnector::cycle(bool heartbeat) {
       transport_.pending(snapshot.at("profile_id").get<std::string>());
   for (const auto &command : commands) {
     require(command.is_object(), "workflow command must be an object");
-    store_.apply_remote(command);
+    if (command.value("operation", "") == "report_incident") {
+      const auto request_id = required_text(command.at("request_id"), "request_id");
+      if (store_.replay_remote_receipt(request_id))
+        continue;
+      auto applied = command;
+      try {
+        require(static_cast<bool>(incident_capture_),
+                "incident capture requires the active edge observer");
+        applied["payload"]["window"] = incident_capture_(command);
+      } catch (const std::exception &error) {
+        applied["payload"]["capture_error"] = error.what();
+      }
+      store_.apply_remote(applied);
+    } else {
+      store_.apply_remote(command);
+    }
   }
   if (!commands.empty()) {
     snapshot = store_.snapshot();
@@ -260,8 +276,35 @@ Json run_workflow_sync(const Options &options, bool once) {
           "--interval-ms must be between 250 and 60000");
   CurlGlobal curl;
   BackendTransport transport(credentials);
+  auto capture_incident = [](const Json &command) {
+    const auto status = read_json(state_root() / "service" / "status.json");
+    require(status.value("state", "") == "running" &&
+                status.contains("session") && status["session"].is_string(),
+            "incident capture requires a running observer session");
+    const auto session = fs::path(status["session"].get<std::string>());
+    const auto meta = read_json(session / "session.json");
+    const auto &payload = command.at("payload");
+    const auto capture_request_id =
+        "incident-" + command.at("request_id").get<std::string>();
+    // The observer persists state before acknowledging the ROS request. This
+    // closes the connector-crash gap: a retry recovers the original edge mark
+    // instead of creating another incident window.
+    const auto observation = read_json(session / "state.json");
+    for (const auto &window : observation.value("windows", Json::array()))
+      if (window.value("capture_request_id", "") == capture_request_id)
+        return window;
+    return ros_request_payload(
+        {{"schema_version", 1},
+         {"request_id", capture_request_id},
+         {"operation", "capture"},
+         {"before", payload.value("before_s", 10.0)},
+         {"after", payload.value("after_s", 3.0)},
+         {"label", required_text(payload.at("label"), "label")}},
+        meta);
+  };
   WorkflowConnector connector(Store(options.path("--store")),
-                              options.need("--robot-id"), transport);
+                              options.need("--robot-id"), transport,
+                              capture_incident);
   if (once) {
     try {
       const auto result = connector.cycle(true);

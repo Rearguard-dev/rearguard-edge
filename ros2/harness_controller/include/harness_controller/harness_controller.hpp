@@ -2,7 +2,7 @@
 // harness kernel's C ABI (edge/include/harness/harness_kernel.h, v2 — the
 // hk_/hkc_ ABI, not the retired harness_-prefixed one).
 //
-// Stage 1 rehearsal rig only (sim/gazebo_rig). This controller owns no safety
+// Stage 1 rehearsal rig only (robot/sim/gazebo_rig). This controller owns no safety
 // logic: every decision happens inside hk_gate(), so the binary this
 // package's plugin-load test exercises is the binary that ships. See
 // edge/README.md's "Integrating" table: "ROS 2 | thin rclcpp ros2_control
@@ -95,7 +95,7 @@ private:
   // hk_event_sink). Drained and reset every cycle, right after hk_gate — see
   // update_and_write_commands. Never parsed here: the framed
   // harness.v1.EnforcementEvent records are republished raw and decoded
-  // downstream (sim/gazebo_rig/mcap_ext.py), so this controller links no
+  // downstream (robot/sim/gazebo_rig/mcap_ext.py), so this controller links no
   // protobuf parsing into its hot path.
   std::vector<std::uint8_t> event_buf_;
   std::size_t event_len_ = 0;

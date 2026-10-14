@@ -5,7 +5,8 @@ class Store {
 public:
   fs::path root;
   explicit Store(fs::path directory);
-  static Store create(const fs::path &directory, const fs::path &config);
+  static Store create(const fs::path &directory, const fs::path &config,
+                      const std::string &profile_id = "");
   Json snapshot() const;
   Json outbox(Ns after = 0) const;
   Json import_artifact(const fs::path &source, const std::string &kind) const;
@@ -13,6 +14,7 @@ public:
                            const std::string &kind) const;
   Json apply(const Json &request) const;
   Json apply_remote(const Json &request) const;
+  bool replay_remote_receipt(const std::string &request_id) const;
   Json pending_sync_receipts() const;
   void acknowledge_sync_receipts(const Json &receipts) const;
   void record_enforcement(const Json &record) const;

@@ -148,14 +148,16 @@ void recording_test(const fs::path &root) {
          {"scope", {{"required_hz", 50}, {"max_input_age_ms", 100},
                      {"required_roles", {"joint_state", "action"}}}}});
   const auto invalidated = store.snapshot();
-  require(invalidated["critic_runtime_status"] == "awaiting_examples" &&
-              invalidated["critic_deployment"]["executable"] == false &&
+  require(invalidated["critic_runtime_status"] == "ready_shadow" &&
+              invalidated["critic_deployment"]["executable"] == true &&
               std::find(invalidated["placeholders"].begin(),
                         invalidated["placeholders"].end(),
-                        Json("critic_inference")) != invalidated["placeholders"].end() &&
+                        Json("critic_inference")) == invalidated["placeholders"].end() &&
+              invalidated["propositions"]["new_unseen_failure"]["detector_status"] == "unknown_no_examples" &&
+              invalidated["critic_compilation"]["ready_propositions"] == 1 &&
               invalidated["critic_compilation"]["generation"].get<int>() ==
                   compiled["critic_compilation"]["generation"].get<int>() + 1,
-          "a new proposition did not invalidate and rebuild the active bank");
+          "a new unknown proposition disabled an already usable detector");
 }
 struct Child {
   pid_t pid = -1;

@@ -2,13 +2,17 @@
   "schema_version": 1,
   "flows": {
     "harness_configuration": {
-      "description": "Connect a robot and define its environment, task, and failures.",
+      "description": "Connect a robot, configure its task, and browse, add or edit failure/recovery propositions from the library.",
       "entry_step": "connect",
       "global_actions": {
-        "update_hardware": { "description": "Update the hardware description without leaving the current setup step.", "handler": "collect_hardware", "artifacts": ["configuration_field"] },
+        "browse_propositions": {"description": "Suggest library templates or list saved profile propositions.", "handler": "browse_propositions", "artifacts": ["proposition_library", "profile_propositions", "proposition_input_required"]},
+        "add_proposition": {"description": "Add a library template by its exact ID. Value must be the template ID.", "handler": "add_proposition", "artifacts": ["proposition_library", "profile_propositions", "proposition_input_required"]},
+        "update_proposition": {"description": "Edit a saved proposition. Value is JSON with id and only user-specified boundary, recovery, unknown_response, reentry, or context fields.", "handler": "update_proposition", "artifacts": ["proposition_library", "profile_propositions", "proposition_input_required"]},
+        "remove_proposition": {"description": "Remove a saved draft proposition by its exact ID.", "handler": "remove_proposition", "artifacts": ["proposition_library", "profile_propositions", "proposition_input_required"]},
+        "refresh_configuration": { "description": "Refresh the discovered ROS 2 configuration without leaving the current setup step.", "handler": "check_setup_discovery", "artifacts": ["ros2_setup_discovery"] },
         "update_environment": { "description": "Update the operating environment without leaving the current setup step.", "handler": "collect_environment", "artifacts": ["configuration_field"] },
         "update_task": { "description": "Update the task description without leaving the current setup step.", "handler": "collect_task", "artifacts": ["configuration_field"] },
-        "replace_failures": { "description": "Replace the configured failure and unsafe-outcome list without leaving the current setup step.", "handler": "replace_failures", "artifacts": ["configuration_field"] }
+        "replace_failures": { "description": "Replace the configured failure and unsafe-outcome list without leaving the current setup step.", "handler": "replace_failures", "artifacts": ["configuration_field", "proposition_library", "profile_propositions", "proposition_input_required"] }
       },
       "steps": {
         "install": {
@@ -35,11 +39,13 @@
             "discovery_help": { "description": "Help starting ROS 2 or a simulation is needed.", "handler": "check_setup_discovery", "artifacts": ["ros2_setup_discovery"] }
           }
         },
-        "robot": {
-          "opening": "Say that the live ROS 2 connection and sample are ready, then naturally ask what hardware they are connecting. Ask for a manufacturer and model, or a short description of a custom build and its main parts. Do not use the terms embodiment, robot step, workflow state, or artifact.",
-          "opening_artifacts": [],
+        "configuration": {
+          "opening": "Present the discovered ROS 2 configuration using only the supplied scan summary, including joints, cameras, sensors, command interfaces, and controllers. Ask the user to confirm that this is the configuration they intend to connect. Do not ask for a manufacturer, model, embodiment, or commercial robot name.",
+          "opening_artifacts": ["ros2_setup_discovery"],
           "actions": {
-            "hardware_description": { "description": "The connected hardware was identified or described.", "next_step": "environment", "handler": "collect_hardware", "artifacts": ["configuration_field"] }
+            "configuration_confirmed": { "description": "The user confirmed the scan-derived ROS 2 configuration.", "next_step": "environment", "handler": "confirm_discovered_configuration", "artifacts": ["configuration_field", "missing_configuration_input"] },
+            "configuration_incorrect": { "description": "The user says the discovered configuration is incomplete or incorrect.", "handler": "state_only", "artifacts": [] },
+            "configuration_question": { "description": "The user asks about the discovered configuration without confirming it.", "handler": "state_only", "artifacts": [] }
           }
         },
         "environment": {
@@ -54,17 +60,17 @@
           "opening": "Ask what task the robot should perform in the described environment.",
           "opening_artifacts": [],
           "actions": {
-            "task_description": { "description": "The robot task was described.", "next_step": "failures", "handler": "collect_task", "artifacts": ["configuration_field"] },
+            "task_description": {"description": "The robot task was described.", "next_step": "failures", "handler": "collect_task", "artifacts": ["configuration_field", "proposition_library", "profile_propositions"]},
             "needs_task_help": { "description": "The user asks what task details are needed.", "handler": "state_only", "artifacts": [] }
           }
         },
         "failures": {
-          "opening": "Ask for the failures or unsafe outcomes the harness must avoid, one or more at a time.",
-          "opening_artifacts": [],
+          "opening": "Offer relevant library propositions, allow custom failures, and explain that boundaries and recovery preferences are editable drafts requiring validation.",
+          "opening_artifacts": ["proposition_library", "profile_propositions"],
           "actions": {
-            "failure_description": { "description": "A failure or unsafe outcome was described.", "handler": "collect_failure", "artifacts": ["configuration_field"] },
+            "failure_description": {"description": "A failure or unsafe outcome was described.", "handler": "collect_failure", "artifacts": ["configuration_field", "proposition_library", "profile_propositions", "proposition_input_required"]},
             "no_more_failures": { "description": "The failure list is complete.", "next_step": "ready", "handler": "complete_harness_configuration", "artifacts": ["harness_configuration", "missing_configuration_input"] },
-            "needs_failure_help": { "description": "The user asks what failure details are needed.", "handler": "state_only", "artifacts": [] }
+            "needs_failure_help": {"description": "The user asks what failure details are needed.", "handler": "browse_propositions", "artifacts": ["proposition_library", "profile_propositions", "proposition_input_required"]}
           }
         },
         "ready": {
@@ -72,7 +78,7 @@
           "opening_artifacts": [],
           "actions": {
             "question": { "description": "A question about the configured harness.", "handler": "get_harness_profile", "artifacts": ["harness_profile"] },
-            "add_failure": { "description": "Add another failure to the setup.", "next_step": "failures", "handler": "state_only", "artifacts": [] }
+            "add_failure": {"description": "Add another failure to the setup.", "next_step": "failures", "handler": "browse_propositions", "artifacts": ["proposition_library", "profile_propositions"]}
           }
         }
       }
@@ -139,6 +145,31 @@
         "complete": { "opening": "Explain that the review is complete.", "opening_artifacts": [], "actions": {
           "review_another": { "description": "Review another candidate.", "next_step": "select_candidate", "handler": "state_only", "artifacts": [] },
           "question": { "description": "Ask about the completed review.", "handler": "state_only", "artifacts": [] }
+        }}
+      }
+    },
+    "incident_response": {
+      "description": "Capture an operator-reported incident, attach it to a failure proposition, collect recovery guidance, and start recovery generation.",
+      "entry_step": "capture",
+      "steps": {
+        "capture": { "opening": "Capture the incident window immediately, then ask the operator what happened.", "opening_artifacts": [], "actions": {
+          "report_incident": { "description": "The operator pressed Report incident and approved capture.", "next_step": "describe", "handler": "report_incident", "artifacts": ["workflow_command", "incident_workflow"] }
+        }},
+        "describe": { "opening": "Ask for a concise incident-level description of what happened.", "opening_artifacts": [], "actions": {
+          "incident_described": { "description": "Store the operator's incident description and show failure propositions that it can be attached to.", "next_step": "attach", "handler": "capture_incident_description", "artifacts": ["incident_workflow", "incident_propositions"] }
+        }},
+        "attach": { "opening": "Ask the operator to attach the incident to one existing failure proposition or create a new one.", "opening_artifacts": [], "actions": {
+          "existing_proposition": { "description": "Attach this incident to an existing proposition. Value must be its exact ID.", "next_step": "guidance", "handler": "select_incident_proposition", "artifacts": ["incident_workflow", "selection_not_found"] },
+          "new_proposition": { "description": "Create a new failure proposition from the operator's description.", "next_step": "guidance", "handler": "create_incident_proposition", "artifacts": ["incident_workflow"] }
+        }},
+        "guidance": { "opening": "Ask what the robot should do to recover safely from this specific failure.", "opening_artifacts": [], "actions": {
+          "guidance_provided": { "description": "Store the recovery guidance. Operator-triggered incident acceptance is already approved.", "next_step": "awaiting_evidence", "handler": "collect_incident_guidance", "artifacts": ["incident_workflow"] }
+        }},
+        "awaiting_evidence": { "opening": "Check capture readiness, accept the reported failure without another approval, then request recovery generation after edge acknowledgement.", "opening_artifacts": [], "actions": {
+          "continue_incident": { "description": "Continue the approved incident workflow after an edge sync.", "handler": "advance_incident", "artifacts": ["workflow_command", "incident_workflow", "recovery_generation"] }
+        }},
+        "generating": { "opening": "Report the current recovery-generation status and keep the incident artifacts synchronized.", "opening_artifacts": [], "actions": {
+          "check_generation": { "description": "Check the recovery generation job and proposal status.", "handler": "check_incident_generation", "artifacts": ["incident_workflow", "recovery_generation"] }
         }}
       }
     },
@@ -212,18 +243,29 @@
     }
   },
   "handlers": {
+    "browse_propositions": {"kind": "read", "description": "Suggest library templates or list saved profile propositions.", "requires": ["domain.profile_id"]},
+    "add_proposition": {"kind": "capture", "description": "Add a library template by its exact ID. Value must be the template ID.", "requires": ["domain.profile_id"]},
+    "update_proposition": {"kind": "capture", "description": "Edit a saved proposition. Value is JSON with id and only user-specified boundary, recovery, unknown_response, reentry, or context fields.", "requires": ["domain.profile_id"]},
+    "remove_proposition": {"kind": "capture", "description": "Remove a saved draft proposition by its exact ID.", "requires": ["domain.profile_id"]},
     "state_only": { "kind": "state", "description": "Advance or answer without external I/O.", "requires": [] },
-    "collect_hardware": { "kind": "capture", "description": "Store the user's hardware description in session state.", "requires": ["input.text"] },
+    "confirm_discovered_configuration": { "kind": "capture", "description": "Confirm the scan-derived ROS 2 configuration and its structural signature.", "requires": ["collected.discovered_configuration", "collected.configuration_id"] },
     "collect_environment": { "kind": "capture", "description": "Store the user's operating environment in session state.", "requires": ["input.text"] },
     "collect_task": { "kind": "capture", "description": "Store the user's task description in session state.", "requires": ["input.text"] },
     "collect_failure": { "kind": "capture", "description": "Append a failure description to session state.", "requires": ["input.text"] },
     "replace_failures": { "kind": "capture", "description": "Replace the complete failure list in session state.", "requires": ["input.text"] },
     "collect_guidance": { "kind": "capture", "description": "Store recovery guidance in session state.", "requires": ["input.text"] },
+    "report_incident": { "kind": "mutation", "description": "Queue an operator-approved incident capture on the edge.", "requires": ["domain.robot_id", "domain.revision"] },
+    "capture_incident_description": { "kind": "capture", "description": "Store the incident-level description and return attachable propositions.", "requires": ["input.text", "domain.snapshot"] },
+    "select_incident_proposition": { "kind": "capture", "description": "Select an existing edge failure proposition by exact ID.", "requires": ["input.proposition_id", "domain.snapshot.propositions"] },
+    "create_incident_proposition": { "kind": "capture", "description": "Draft a new proposition to create as part of incident acceptance.", "requires": ["input.text"] },
+    "collect_incident_guidance": { "kind": "capture", "description": "Store operator recovery guidance for this incident.", "requires": ["input.text"] },
+    "advance_incident": { "kind": "mutation", "description": "Accept the captured incident and request recovery generation as edge acknowledgements arrive.", "requires": ["domain.robot_id", "domain.revision"] },
+    "check_incident_generation": { "kind": "read", "description": "Read recovery generation status for the reported incident.", "requires": ["domain.snapshot.jobs"] },
     "show_install_instructions": { "kind": "local", "description": "Return the supported edge installation command.", "requires": [] },
     "show_connect_instructions": { "kind": "local", "description": "Return edge connection and pairing instructions.", "requires": [] },
     "claim_device_pairing": { "kind": "mutation", "description": "Claim a device using an eight-character pairing code.", "requires": ["input.pairing_code", "authorization.user"] },
     "check_setup_discovery": { "kind": "read", "description": "Read the latest ROS 2 setup scan and verify a captured sample.", "requires": ["domain.setup_discovery"] },
-    "complete_harness_configuration": { "kind": "mutation", "description": "Persist the collected profile configuration.", "requires": ["domain.profile_id", "collected.device_id", "collected.robot_type", "collected.environment", "collected.task", "domain.setup_discovery_ready"] },
+    "complete_harness_configuration": { "kind": "mutation", "description": "Persist the collected profile configuration.", "requires": ["domain.profile_id", "collected.device_id", "collected.configuration_id", "collected.environment", "collected.task", "domain.setup_discovery_ready"] },
     "get_harness_profile": { "kind": "read", "description": "Return the configured harness profile.", "requires": ["domain.profile_id"] },
     "list_recordings": { "kind": "read", "description": "List ready MCAP recordings for the profile.", "requires": ["domain.profile_id"] },
     "select_recording": { "kind": "read", "description": "Load one selected recording.", "requires": ["input.recording_id", "domain.profile_id"] },
@@ -248,6 +290,9 @@
     "unavailable": { "kind": "input_gate", "description": "Report that a declared product capability is not implemented.", "requires": [] }
   },
   "artifacts": {
+    "proposition_library": {"label": "Suggested failure propositions", "renderer": "proposition_library", "surface": "chat"},
+    "profile_propositions": {"label": "Your failure propositions", "renderer": "profile_propositions", "surface": "chat"},
+    "proposition_input_required": {"label": "Proposition details required", "renderer": "notice", "surface": "chat"},
     "approved_recovery_bundles": { "label": "Approved recovery policies ready", "renderer": "collection", "surface": "chat" },
     "capability_unavailable": { "label": "Capability unavailable", "renderer": "notice", "surface": "chat" },
     "configuration_field": { "label": "Profile detail captured", "renderer": "configuration_field", "surface": "chat" },
@@ -258,6 +303,8 @@
     "enforcement_history": { "label": "Enforcement history ready", "renderer": "collection", "surface": "chat" },
     "failure_candidate": { "label": "Failure proposal selected", "renderer": "detail", "surface": "chat" },
     "failure_candidates": { "label": "Failure proposals ready", "renderer": "collection", "surface": "chat" },
+    "incident_propositions": { "label": "Failure propositions ready", "renderer": "collection", "surface": "context" },
+    "incident_workflow": { "label": "Incident workflow updated", "renderer": "incident", "surface": "context" },
     "flow_dependency": { "label": "Checking workflow prerequisites", "renderer": "notice", "surface": "chat" },
     "harness_configuration": { "label": "Harness configuration saved", "renderer": "profile", "surface": "context" },
     "harness_profile": { "label": "Harness profile ready", "renderer": "profile", "surface": "context" },
@@ -268,6 +315,7 @@
     "paired_device": { "label": "Device paired", "renderer": "device", "surface": "context" },
     "profile_events_reconciled": { "label": "Profile updates checked", "renderer": "activity", "surface": "chat" },
     "recovery_bundle": { "label": "Recovery policy selected", "renderer": "detail", "surface": "chat" },
+    "recovery_generation": { "label": "Recovery generation updated", "renderer": "incident", "surface": "context" },
     "recovery_bundles": { "label": "Recovery proposals ready", "renderer": "collection", "surface": "chat" },
     "render_job": { "label": "Preparing render", "renderer": "render_job", "surface": "context" },
     "render_selection_required": { "label": "Synchronized view selection required", "renderer": "notice", "surface": "chat" },

@@ -10,8 +10,9 @@ Json workflow(const Options &o) {
   if (o.command == "sync" || o.command == "sync-once")
     return run_workflow_sync(o, o.command == "sync-once");
   if (o.command == "init") {
-    o.allow("--store --config");
-    return Store::create(root, o.need("--config")).snapshot();
+    o.allow("--store --config --profile-id");
+    return Store::create(root, o.need("--config"),
+                         o.get("--profile-id")).snapshot();
   }
   Store store(root);
   if (o.command == "show") {
@@ -210,7 +211,7 @@ int command_main(const std::string &group, int argc, char **argv) {
                           {"uploader", "--store DIR (--session DIR|--sessions-root DIR) [--credentials FILE] "
                                        "[--backend-url URL] [--interval-ms 2000]"}}
                     : std::map<std::string, std::string>{
-                    {"init", "--store DIR --config FILE|so101"},
+                    {"init", "--store DIR --config FILE|so101 [--profile-id ID]"},
                     {"show", "--store DIR"},
                     {"outbox", "--store DIR [--after 0]"},
                     {"artifact", "--store DIR --kind "

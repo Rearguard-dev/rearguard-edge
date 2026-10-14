@@ -114,7 +114,7 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
         {"recovery", proposition["recovery"]}};
   }
   Json source = {{"schema_version", 1},
-                 {"compiler", "edge_profile_compiler_v1"},
+                 {"compiler", "edge_profile_compiler_v2"},
                  {"encoder", critic_feature_encoder},
                  {"profile_id", state["profile_id"]},
                  {"binding_hash", state["binding_hash"]},
@@ -123,9 +123,11 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
   const auto input_hash = digest(source);
   const auto previous = state.value("critic_compilation", Json(nullptr));
   if (previous.is_object() && previous.value("input_hash", "") == input_hash &&
-      !(previous.value("compile_state", "") == "awaiting_ros_runtime" &&
-        snapshot_compiler_available()))
+      !((previous.value("compile_state", "") == "awaiting_ros_runtime" ||
+         previous.value("awaiting_runtime_embeddings", false)) && snapshot_compiler_available())) {
+    state["critic_runtime_status"] = previous["compile_state"];
     return;
+  }
   Json embedding_cache = Json::object();
   if (previous.is_object() &&
       previous.value("encoder", "") == critic_feature_encoder &&
@@ -140,13 +142,15 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
 
   Json heads = Json::array(), runtime_heads = Json::array(), classes = Json::array();
   bool missing_examples = false, compile_error = false, runtime_unavailable = false;
+  std::size_t ready_heads = 0;
   for (auto it = state["propositions"].begin();
        it != state["propositions"].end(); ++it) {
     const auto &proposition = it.value();
+    bool head_error = false, head_runtime_unavailable = false;
     std::uint32_t required_roles = 0;
     for (const auto &role : proposition["scope"]["required_roles"]) {
       const auto bit = critic_role_bit(role.get<std::string>());
-      compile_error = compile_error || bit == 0;
+      head_error = head_error || bit == 0;
       required_roles |= bit;
     }
     Json snapshots = Json::array(), centers = Json::array(), center_counts = Json::array();
@@ -169,8 +173,8 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
                                         required_roles);
         record["embedding"] = embedded;
         const auto status = embedded.value("status", "error");
-        if (status == "runtime_unavailable") runtime_unavailable = true;
-        if (status != "ready") compile_error = compile_error || status != "runtime_unavailable";
+        if (status == "runtime_unavailable") head_runtime_unavailable = true;
+        if (status != "ready") head_error = head_error || status != "runtime_unavailable";
         if (status == "ready") {
           require(embedded["vector"].is_array() &&
                       embedded["vector"].size() == critic_embedding_dimensions,
@@ -203,7 +207,7 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
         }
       } catch (const std::exception &error) {
         record["embedding"] = {{"status", "error"}, {"error", error.what()}};
-        compile_error = true;
+        head_error = true;
       }
       snapshots.push_back(std::move(record));
     }
@@ -212,6 +216,10 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
       for (const auto value : sums[k])
         norm += static_cast<double>(value) * static_cast<double>(value);
       norm = std::sqrt(norm);
+      if (!std::isfinite(norm) || norm < 1e-8) {
+        head_error = true;
+        continue;
+      }
       Json center = Json::array();
       for (const auto value : sums[k])
         center.push_back(static_cast<double>(value) / norm);
@@ -219,9 +227,16 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
       center_counts.push_back(counts[k]);
     }
     missing_examples = missing_examples || snapshots.empty();
+    compile_error = compile_error || head_error;
+    runtime_unavailable = runtime_unavailable || head_runtime_unavailable;
+    if (head_error || head_runtime_unavailable) {
+      centers = Json::array();
+      center_counts = Json::array();
+    }
     const std::string head_status =
         snapshots.empty() ? "unknown_no_examples" :
         centers.empty() ? "embedding_failed" : "ready";
+    if (head_status == "ready") ++ready_heads;
     state["propositions"][it.key()]["detector_status"] = head_status;
     heads.push_back({{"proposition_id", it.key()},
                      {"description", proposition["description"]},
@@ -247,17 +262,20 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
                               : 1;
   const auto context_hash = digest(state["critic_context"]);
   const std::string compile_state =
+      ready_heads > 0 ? "ready_shadow" :
       missing_examples ? "awaiting_examples" :
       compile_error ? "compile_failed" :
       runtime_unavailable ? "awaiting_ros_runtime" : "ready_shadow";
   Json compiled = {{"schema_version", 1},
-                   {"compiler", "edge_profile_compiler_v1"},
+                   {"compiler", "edge_profile_compiler_v2"},
                    {"encoder", critic_feature_encoder},
                    {"generation", generation},
                    {"profile_revision", profile_revision},
                    {"input_hash", input_hash},
                    {"context_hash", context_hash},
                    {"heads", heads},
+                   {"ready_propositions", ready_heads},
+                   {"awaiting_runtime_embeddings", runtime_unavailable},
                    {"compile_state", compile_state}};
   compiled["model_hash"] = digest(compiled);
   state["critic_compilation"] = compiled;
@@ -268,7 +286,7 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
       {"profile_revision", profile_revision},
       {"binding_hash", state["binding_hash"]},
       {"runtime", "proposition_bank_v1"},
-      {"compiler", "edge_profile_compiler_v1"},
+      {"compiler", "edge_profile_compiler_v2"},
       {"model_hash", compiled["model_hash"]},
       {"context_hash", context_hash},
       {"classes", classes},
@@ -306,8 +324,13 @@ Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
           "body TEXT NOT NULL)");
   auto state = observation::snapshot(db);
   const auto before_compile = state;
-  if (state.value("critic_runtime_status", "") == "awaiting_ros_runtime" &&
-      snapshot_compiler_available())
+  const auto compilation = state.value("critic_compilation", Json(nullptr));
+  const bool compiler_changed = compilation.is_object() &&
+      compilation.value("compiler", "") != "edge_profile_compiler_v2";
+  const bool retry_runtime = snapshot_compiler_available() &&
+      (state.value("critic_runtime_status", "") == "awaiting_ros_runtime" ||
+       (compilation.is_object() && compilation.value("awaiting_runtime_embeddings", false)));
+  if (compiler_changed || retry_runtime)
     compile_critic(state, root, state.value<Ns>("revision", 0));
   if (state.contains("placeholders") && state["placeholders"].is_array()) {
     auto &placeholders = state["placeholders"];
@@ -322,20 +345,26 @@ Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
     }
   }
 }
-Store Store::create(const fs::path &directory, const fs::path &config) {
+Store Store::create(const fs::path &directory, const fs::path &config,
+                    const std::string &requested_profile_id) {
   auto binding = load_config(config);
   fs::create_directories(directory);
   const auto path = directory / "workflow.sqlite3";
   const int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
   require(fd >= 0, "store already exists or cannot be created");
   ::close(fd);
-  const auto profile_id = "profile-" + unique_id();
+  const auto profile_id = requested_profile_id.empty()
+                              ? "profile-" + unique_id()
+                              : requested_profile_id;
+  require(profile_id.size() <= 128 && !profile_id.empty(),
+          "profile ID must contain at most 128 characters");
   const auto binding_hash = digest(binding);
   Json state = {{"schema_version", 1},
                 {"profile_id", profile_id},
                 {"revision", 0},
                 {"binding", binding},
                 {"binding_hash", binding_hash},
+                {"incident_requests", Json::object()},
                 {"candidates", Json::object()},
                 {"failures", Json::object()},
                 {"propositions", Json::object()},
@@ -474,6 +503,20 @@ Json Store::apply_remote(const Json &request) const {
     save.next();
     return receipt;
   }
+}
+bool Store::replay_remote_receipt(const std::string &request_id) const {
+  Database db(root / "workflow.sqlite3");
+  Statement existing(db, "SELECT response FROM receipts WHERE id=?");
+  existing.bind(1, request_id);
+  if (!existing.next()) return false;
+  const Json receipt = {{"request_id", request_id}, {"status", "applied"},
+                        {"result", Json::parse(existing.text(0))}};
+  Statement save(db, "INSERT INTO sync_receipts VALUES(?,?) ON CONFLICT(id) "
+                     "DO UPDATE SET body=excluded.body");
+  save.bind(1, request_id);
+  save.bind(2, encoded(receipt));
+  save.next();
+  return true;
 }
 Json Store::pending_sync_receipts() const {
   Database db(root / "workflow.sqlite3");
@@ -640,6 +683,35 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
             std::string("unknown ") + key);
     return s.at(collection).at(p.at(key).get<std::string>());
   };
+  if (op == "report_incident") {
+    require(!p.contains("capture_error"),
+            p.value("capture_error", "edge observer rejected incident capture"));
+    const auto &window = p.at("window");
+    require(window.is_object() &&
+                (window.value("status", "") == "collecting" ||
+                 window.value("status", "") == "ready") &&
+                window.value("trigger", "") == "operator_mark" &&
+                window.contains("start_ns") && window.contains("mark_ns") &&
+                window.contains("end_ns"),
+            "edge observer returned an invalid incident window");
+    if (!s.contains("incident_requests"))
+      s["incident_requests"] = Json::object();
+    const auto id = required_text(window.at("id"), "window id");
+    require(!s["incident_requests"].contains(id),
+            "incident window already exists");
+    Json candidate_id = nullptr;
+    std::string status = window.value("status", "collecting");
+    for (auto it = s["candidates"].begin(); it != s["candidates"].end(); ++it)
+      if (it.value().at("window").value("id", "") == id) {
+        candidate_id = it.key();
+        status = it.value().value("evidence", Json(nullptr)).is_null()
+                     ? "preparing_evidence" : "ready";
+        break;
+      }
+    return s["incident_requests"][id] = {
+        {"id", id}, {"status", status}, {"window", window},
+        {"requested_by", actor}, {"candidate_id", candidate_id}};
+  }
   if (op == "set_critic_context") {
     const auto &context = p.at("context");
     require(context.value("schema_version", 0) == 1,
@@ -725,10 +797,17 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
         digest(Json::array({session, w.at("epoch"), w.at("id")})).substr(0, 24);
     if (s["candidates"].contains(id))
       return s["candidates"][id];
-    return s["candidates"][id] = {
+    auto candidate = Json{
         {"id", id}, {"session_id", session}, {"window", w},
         {"detection", d}, {"status", "pending_review"},
         {"approved_recovery_match", nullptr}, {"evidence", nullptr}};
+    s["candidates"][id] = candidate;
+    const auto window_id = w.at("id").get<std::string>();
+    if (s.value("incident_requests", Json::object()).contains(window_id))
+      s["incident_requests"][window_id].update(
+          {{"status", "preparing_evidence"}, {"window", w},
+           {"candidate_id", id}});
+    return candidate;
   }
   if (op == "attach_evidence") {
     auto &c = item("candidates", "candidate_id");
@@ -736,6 +815,10 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
             "candidate evidence is immutable once attached");
     verify_artifact(p.at("artifact"), "evidence_mcap");
     c["evidence"] = p["artifact"];
+    const auto window_id = c.at("window").at("id").get<std::string>();
+    if (s.value("incident_requests", Json::object()).contains(window_id))
+      s["incident_requests"][window_id].update(
+          {{"status", "ready"}, {"candidate_id", c["id"]}});
     // Routing happens only after immutable MCAP evidence is attached. An
     // unvalidated critic cannot reach this branch, even when a
     // random label happens to equal an approved evidence class.
@@ -779,6 +862,33 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
       return c;
     }
     verify_artifact(c["evidence"], "evidence_mcap");
+    require(!(p.contains("proposition_id") && p.contains("new_proposition")),
+            "choose either an existing or a new proposition");
+    if (p.contains("new_proposition")) {
+      const auto &draft = p.at("new_proposition");
+      const auto proposition_id =
+          required_text(draft.at("proposition_id"), "proposition_id");
+      require(!s["propositions"].contains(proposition_id),
+              "proposition already exists");
+      Json roles = Json::array();
+      for (const auto &topic : s["binding"]["topics"])
+        if (topic.value("required", true)) {
+          const auto role = topic.value("role", "");
+          if (!role.empty() &&
+              std::find(roles.begin(), roles.end(), Json(role)) == roles.end())
+            roles.push_back(role);
+        }
+      require(!roles.empty(), "profile has no required modality roles");
+      s["propositions"][proposition_id] = {
+          {"id", proposition_id},
+          {"description", required_text(draft.at("description"), "proposition description")},
+          {"polarity", "must_avoid"},
+          {"scope", {{"required_hz", 1}, {"max_input_age_ms", 10000},
+                     {"required_roles", roles}}},
+          {"snapshots", Json::array()}, {"recovery", nullptr},
+          {"candidate_threshold", 0.95}, {"detector_status", "unconfigured"},
+          {"created_by", actor}};
+    }
     const auto id = "f-" + unique_id().substr(0, 16);
     Json failure = {
         {"id", id},
@@ -787,8 +897,11 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
         {"guidance", required_text(p.at("guidance"), "guidance")},
         {"guidance_revision", 1},
         {"accepted_by", actor}};
-    if (p.contains("proposition_id")) {
-      auto &proposition = item("propositions", "proposition_id");
+    if (p.contains("proposition_id") || p.contains("new_proposition")) {
+      const auto proposition_id = p.contains("proposition_id")
+          ? p.at("proposition_id").get<std::string>()
+          : p.at("new_proposition").at("proposition_id").get<std::string>();
+      auto &proposition = s["propositions"].at(proposition_id);
       failure["proposition_id"] = proposition["id"];
       // Keep exact immutable evidence and time bounds. A moment belongs to a
       // proposition only through this explicit acceptance, never label guessing.
@@ -803,6 +916,10 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
     c.update({{"status", "accepted_failure"},
               {"failure_id", id},
               {"reviewed_by", actor}});
+    const auto window_id = c.at("window").at("id").get<std::string>();
+    if (s.value("incident_requests", Json::object()).contains(window_id))
+      s["incident_requests"][window_id].update(
+          {{"status", "accepted"}, {"failure_id", id}});
     return failure;
   }
   if (op == "set_guidance") {

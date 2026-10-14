@@ -193,6 +193,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
             require(!selected.empty(), "no observation binding for assigned embodiment");
           }
           config["robot_id"] = assignment.at("robot_id");
+          config["profile_id"] = assignment.at("profile_id");
           config["embodiment"] = embodiment;
           if (!selected.empty()) config["observation_config"] = selected;
           atomic_json(config_path(), config);
@@ -222,7 +223,8 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
       if (!fs::exists(store / "workflow.sqlite3")) {
         const int code = run({executable_path.string(), "workflow", "init", "--store",
                               store.string(), "--config",
-                              config["observation_config"].get<std::string>()});
+                              config["observation_config"].get<std::string>(),
+                              "--profile-id", config.value("profile_id", "")});
         record_event("workflow", "initialize", code == 0 ? "success" : "failure",
                      {{"exit_code", code}, {"store", store.string()}});
         if (code != 0) {
@@ -358,6 +360,7 @@ Json start_service_after_connect() {
     if (previous.value("device_id", "") != device_id) {
       stop_service_if_running();
       changes = {{"device_id", device_id}, {"robot_id", nullptr},
+                 {"profile_id", nullptr},
                  {"embodiment", nullptr}, {"observation_config", nullptr}};
     }
   }

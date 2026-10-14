@@ -16,7 +16,7 @@ FAIL=0
 echo "== rule 1: schemas/ depends on nothing else in the monorepo"
 # schemas/*.proto and schemas/buf.* only ever reference other schemas/ files
 # (relative "harness/v1/..." imports resolve within the buf module); nothing
-# there should reach into backend/, edge/, sim/, or web/.
+# there should reach into backend/, edge/, robot/sim/, or web/.
 if grep -rn '\.\./\(backend\|edge\|sim\|web\)' schemas/proto schemas/buf.yaml schemas/buf.gen.yaml 2>/dev/null; then
   echo "FAIL: schemas/ references another monorepo package" >&2
   FAIL=1

@@ -5,7 +5,7 @@ against the C ABI (`kernel.py`), plus two ways to get the `.so` onto disk —
 `build.py`'s build-from-source cache (for iterating on the kernel itself, or
 before a version has been released) and `release.py`'s fetch-a-published-
 release cache (the production path — see edge/README.md). Nothing in this
-package is specific to any one consumer; `sim/` depends on it the way any
+package is specific to any one consumer; `robot/sim/` depends on it the way any
 other integration would, by installing it and importing it.
 """
 

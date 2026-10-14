@@ -1,6 +1,7 @@
 #include "evidence.hpp"
 #include "events.hpp"
 #include "runtime.hpp"
+#include "controller_handover.hpp"
 #include "sync.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -75,12 +76,18 @@ struct Fixture {
                                 {"artifact", artifact("evidence_mcap")}});
     return c;
   }
-  Json bundle() {
+  Json bundle(bool with_proposition = false) {
     const auto c = candidate();
-    const auto f =
-        apply("accept_failure", {{"candidate_id", c["id"]},
-                                 {"description", "failed grasp"},
-                                 {"guidance", "hold and reacquire"}});
+    Json acceptance = {{"candidate_id", c["id"]}, {"description", "failed grasp"},
+                       {"guidance", "hold and reacquire"}};
+    if (with_proposition) {
+      apply("add_proposition", {{"proposition_id", "target_moved"},
+          {"description", "Target moved"},
+          {"scope", {{"required_hz", 10}, {"max_input_age_ms", 100},
+                     {"required_roles", {"joint_state"}}}}});
+      acceptance["proposition_id"] = "target_moved";
+    }
+    const auto f = apply("accept_failure", acceptance);
     const auto j = apply(
         "request_demonstration",
         {{"failure_id", f["id"]}, {"requested_model", "external-fixture"}});
@@ -111,10 +118,13 @@ struct Fixture {
                   {"recovery_sha256", content["recovery"]["sha256"]}});
     return apply("submit_bundle", {{"job_id", j["id"]}, {"bundle", content}});
   }
-  Json deploy() {
-    const auto b = bundle();
+  Json deploy(bool with_proposition = false) {
+    const auto b = bundle(with_proposition);
     apply("approve_bundle",
           {{"bundle_id", b["id"]}, {"content_hash", b["content_hash"]}});
+    if (with_proposition)
+      apply("link_proposition_recovery", {{"proposition_id", "target_moved"},
+            {"bundle_id", b["id"]}, {"content_hash", b["content_hash"]}});
     return apply("deploy", {{"bundle_id", b["id"]}});
   }
 };
@@ -131,14 +141,15 @@ struct FakeCritic final : CriticAdapter {
 struct FakeController final : ControllerAdapter {
   std::string outcome = "running";
   bool hold_ack = true, begin_ack = true, resume_ack = true;
+  int begins = 0, holds = 0;
   bool ready() const override { return true; }
   bool prepare(const fs::path &, const Json &, const Json &) override {
     return true;
   }
-  bool begin() override { return begin_ack; }
+  bool begin() override { ++begins; return begin_ack; }
   std::string poll() override { return outcome; }
   bool resume() override { return resume_ack; }
-  bool hold(const std::string &) override { return hold_ack; }
+  bool hold(const std::string &) override { ++holds; return hold_ack; }
 };
 struct FakeWorkflowTransport final : WorkflowTransport {
   Json commands = Json::array();
@@ -206,6 +217,16 @@ void evidence_tests() {
   rejects([&] { bad.promote(bad_id, "failure", "operator"); }, "insufficient");
 }
 void workflow_tests() {
+  {
+    const auto root = fs::temp_directory_path() /
+                      ("harness-bound-profile-test-" + unique_id());
+    const auto bound = Store::create(root / "bound-store",
+                                     HARNESS_OBSERVATION_CONFIG,
+                                     "hp_browser_authored");
+    check(bound.snapshot()["profile_id"] == "hp_browser_authored",
+          "edge store can inherit the browser-authored profile identity");
+    fs::remove_all(root);
+  }
   {
     Fixture f;
     const Json scope = {{"required_hz", 200}, {"max_input_age_ms", 10},
@@ -365,7 +386,60 @@ void workflow_tests() {
               transport.uploads.back()["snapshot"] == local_profile,
           "connector uploads the retained harness after reconnecting");
   }
+  {
+    Fixture incident;
+    FakeWorkflowTransport transport;
+    transport.commands.push_back(
+        {{"schema_version", 1},
+         {"request_id", "00000000-0000-4000-8000-000000000010"},
+         {"actor", "web-user"},
+         {"expected_revision", 0},
+         {"operation", "report_incident"},
+         {"payload", {{"label", "operator report"}, {"before_s", 10},
+                      {"after_s", 3}}}});
+    int capture_calls = 0;
+    WorkflowConnector connector(
+        incident.store, "00000000-0000-4000-8000-000000000102", transport,
+        [&](const Json &) {
+          ++capture_calls;
+          return Json{{"id", "w-web-report"}, {"epoch", 2},
+                      {"start_ns", 100}, {"mark_ns", 200}, {"end_ns", 300},
+                      {"label", "operator report"}, {"status", "collecting"},
+                      {"trigger", "operator_mark"}};
+        });
+    connector.cycle();
+    const auto profile = incident.store.snapshot();
+    check(capture_calls == 1 && profile["revision"] == 1 &&
+              profile["incident_requests"]["w-web-report"]["window"]["mark_ns"] == 200 &&
+              transport.uploads.back()["receipts"][0]["status"] == "applied",
+          "web incident command is timestamped by the observer and durably mirrored");
+    transport.commands.push_back(
+        {{"schema_version", 1},
+         {"request_id", "00000000-0000-4000-8000-000000000010"},
+         {"actor", "web-user"}, {"expected_revision", 0},
+         {"operation", "report_incident"},
+         {"payload", {{"label", "operator report"}, {"before_s", 10},
+                      {"after_s", 3}}}});
+    connector.cycle();
+    check(capture_calls == 1 && incident.store.snapshot()["revision"] == 1,
+          "incident command retry replays its receipt without marking a second window");
+  }
   Fixture f;
+  {
+    Fixture created;
+    const auto candidate = created.candidate();
+    const auto failure = created.apply(
+        "accept_failure",
+        {{"candidate_id", candidate["id"]}, {"description", "missed grasp"},
+         {"guidance", "hold and retry"},
+         {"new_proposition",
+          {{"proposition_id", "incident_missed_grasp"},
+           {"description", "The gripper must not miss the target"}}}});
+    const auto profile = created.store.snapshot();
+    check(failure["proposition_id"] == "incident_missed_grasp" &&
+              profile["propositions"]["incident_missed_grasp"]["snapshots"].size() == 1,
+          "incident review can create and attach a proposition atomically");
+  }
   Json retry = {{"schema_version", 1},       {"request_id", "retry"},
                 {"actor", "operator"},       {"expected_revision", 0},
                 {"operation", "deactivate"}, {"payload", {{"reason", "test"}}}};
@@ -489,12 +563,157 @@ void event_tests() {
   ::unsetenv("REARGUARD_STATE_DIR");
   fs::remove_all(root);
 }
+struct FakeAuthority final : ControllerAuthority {
+  bool acquire_ack = true, release_ack = true, owns_recovery = true,
+       owns_nominal = true;
+  int acquisitions = 0, releases = 0, holds = 0;
+  bool ready() const override { return true; }
+  bool acquire() override { ++acquisitions; return acquire_ack; }
+  bool recovery_owns_commands() override { return owns_recovery; }
+  bool release() override { ++releases; return release_ack; }
+  bool nominal_owns_commands() override { return owns_nominal; }
+  bool hold(const std::string &) override { ++holds; return true; }
+};
+void handover_tests() {
+  FakeAuthority authority;
+  FakeController executor;
+  SwitchingRecoveryController controller(authority, executor);
+  check(!controller.begin() && authority.acquisitions == 0,
+        "unprepared controller cannot acquire authority");
+  check(controller.prepare({}, {}, {}), "handover prepared");
+  check(controller.begin() && executor.begins == 1, "exclusive takeover starts executor");
+  check(controller.begin() && authority.acquisitions == 1 && executor.begins == 2,
+        "retries retain exclusive authority");
+  executor.resume_ack = false;
+  check(!controller.resume() && authority.releases == 0,
+        "unready nominal reentry cannot release authority");
+  executor.resume_ack = true;
+  check(controller.resume() && authority.releases == 1, "verified handback");
+  check(!controller.hold("monitoring disabled") && authority.holds == 0,
+        "nominal controller does not acquire fallback authority");
+  check(controller.begin(), "second takeover");
+  authority.owns_recovery = false;
+  check(controller.poll() == "authority_lost", "ownership loss is detected");
+  check(!controller.resume(), "ownership loss forbids blind handback");
+  check(controller.hold("ownership lost"), "ownership loss requests configured fallback");
+  check(!controller.begin() && !controller.prepare({}, {}, {}),
+        "held controller cannot automatically rearm");
+  for (int failure = 0; failure < 2; ++failure) {
+    FakeAuthority port;
+    FakeController runner;
+    SwitchingRecoveryController c(port, runner);
+    c.prepare({}, {}, {});
+    port.acquire_ack = failure != 0;
+    port.owns_recovery = failure == 0;
+    check(!c.begin() && runner.begins == 0,
+          "switch failure or unconfirmed ownership prevents recovery commands");
+    check(c.hold("takeover failed") && port.holds == 1,
+          "partial acquisition enters fallback");
+  }
+  {
+    FakeAuthority port;
+    FakeController runner;
+    SwitchingRecoveryController c(port, runner);
+    c.prepare({}, {}, {});
+    c.begin();
+    port.owns_nominal = false;
+    check(!c.resume(), "service success alone does not confirm handback");
+    check(c.hold("handback failed"), "unconfirmed handback enters fallback");
+  }
+}
+void authorization_tests() {
+  {
+    Fixture f;
+    f.deploy();
+    FakeCritic critic;
+    FakeController controller;
+    Runtime runtime(f.store, critic, controller);
+    rejects([&] { runtime.activate(); }, "accepted failure proposition");
+    check(controller.begins == 0 && controller.holds == 0,
+          "approved legacy bundle alone cannot intervene");
+  }
+  {
+    Fixture f;
+    const auto b = f.bundle(true);
+    f.apply("approve_bundle", {{"bundle_id", b["id"]},
+                               {"content_hash", b["content_hash"]}});
+    f.apply("deploy", {{"bundle_id", b["id"]}});
+    FakeCritic critic;
+    FakeController controller;
+    Runtime runtime(f.store, critic, controller);
+    rejects([&] { runtime.activate(); }, "attached approved recovery");
+    check(controller.begins == 0 && controller.holds == 0,
+          "approval without proposition attachment cannot intervene");
+  }
+  {
+    Fixture f;
+    const auto d = f.deploy(true);
+    FakeCritic critic;
+    FakeController controller;
+    Runtime runtime(f.store, critic, controller);
+    runtime.activate();
+    check(runtime.step({}, 0).is_null(), "unvalidated detection cannot intervene");
+    critic.detection->deployment_validated = true;
+    critic.detection->deployment_id = d["id"];
+    critic.detection->proposition_id = "unrelated";
+    check(runtime.step({}, 0.1).is_null(), "unrelated proposition cannot borrow approval");
+    critic.detection->proposition_id = "target_moved";
+    critic.detection->deployment_id = "old-deployment";
+    check(runtime.step({}, 0.2).is_null(), "stale deployment cannot intervene");
+    critic.detection->deployment_id = d["id"];
+    critic.detection->source = "test_injection";
+    check(runtime.step({}, 0.3).is_null(), "injected evidence cannot intervene");
+    critic.detection->source = "trained_critic";
+    critic.detection->confidence = std::numeric_limits<double>::quiet_NaN();
+    check(runtime.step({}, 0.4)["kind"] == "blocked" && controller.holds == 0 &&
+              controller.begins == 0, "invalid evidence does not acquire hold authority");
+    runtime.deactivate();
+    runtime.activate();
+    runtime.deactivate();
+    check(controller.holds == 0, "disarming monitoring does not stop the robot");
+  }
+}
+void authorized_handover_test() {
+  Fixture f;
+  const auto d = f.deploy(true);
+  FakeCritic critic;
+  FakeController executor;
+  FakeAuthority authority;
+  SwitchingRecoveryController controller(authority, executor);
+  Runtime runtime(f.store, critic, controller);
+  runtime.activate();
+  runtime.step({}, 0);
+  check(authority.acquisitions == 0, "arming alone does not switch controllers");
+  critic.detection->deployment_validated = true;
+  critic.detection->deployment_id = d["id"];
+  critic.detection->proposition_id = "target_moved";
+  check(runtime.step({}, 0.1)["kind"] == "recovery_started" &&
+            authority.acquisitions == 1 && executor.begins == 1,
+        "approved proposition drives verified controller takeover");
+  executor.outcome = "succeeded";
+  check(runtime.step({}, 0.2)["kind"] == "recovery_completed" &&
+            authority.releases == 1, "runtime confirms complete handover round trip");
+  critic.detection.reset();
+  runtime.step({}, 0.3);
+  critic.detection = Detection{"tiny", "target_moved", 0.9};
+  critic.detection->deployment_validated = true;
+  critic.detection->deployment_id = d["id"];
+  critic.detection->proposition_id = "target_moved";
+  runtime.step({}, 0.4);
+  f.apply("deactivate", {{"reason", "operator revoked deployment"}});
+  check(runtime.step({}, 0.5)["kind"] == "fallback" && authority.holds == 1 &&
+            authority.releases == 1,
+        "revocation during recovery retains fallback instead of blind release");
+}
 void runtime_tests() {
   Fixture f;
-  f.deploy();
+  const auto deployment = f.deploy(true);
   FakeCritic critic;
   FakeController controller;
   Runtime r(f.store, critic, controller);
+  critic.detection->deployment_id = deployment["id"];
+  critic.detection->deployment_validated = true;
+  critic.detection->proposition_id = "target_moved";
   r.activate();
   check(r.step({}, 0)["kind"] == "recovery_started", "recovery begins");
   const auto started = f.store.pending_enforcements();
@@ -518,6 +737,9 @@ void runtime_tests() {
   critic.detection.reset();
   r.step({}, 0.3);
   critic.detection = Detection{"tiny", "target_moved", 0.9};
+  critic.detection->deployment_id = deployment["id"];
+  critic.detection->deployment_validated = true;
+  critic.detection->proposition_id = "target_moved";
   check(r.step({}, 0.4)["kind"] == "recovery_started",
         "new rising evidence triggers");
   check(r.step({}, 1.4)["kind"] == "fallback", "monotonic timeout");
@@ -529,11 +751,12 @@ void runtime_tests() {
   check(r.step({}, 2.2)["kind"] == "fallback", "retry exhaustion");
   r.deactivate();
   r.activate();
-  check(r.step({}, 3, false)["hold_acknowledged"] == true,
-        "stale observations fallback");
+  check(r.step({}, 3, false)["kind"] == "blocked",
+        "stale observations cannot initiate intervention");
   r.deactivate();
   r.activate();
   controller.hold_ack = false;
+  r.step({}, 3.9);
   check(r.step({}, 4, false)["hold_acknowledged"] == false &&
             r.status == "fault_unconfirmed_hold",
         "no false hold claim");
@@ -541,7 +764,7 @@ void runtime_tests() {
   r.deactivate();
   r.activate();
   f.apply("deactivate", {{"reason", "operator"}});
-  check(r.step({}, 5)["kind"] == "fallback", "deployment change stops runtime");
+  check(r.step({}, 5)["kind"] == "blocked", "deployment change blocks without takeover");
 }
 } // namespace
 int main() {
@@ -558,6 +781,9 @@ int main() {
         "SHA256 known vector");
     evidence_tests();
     workflow_tests();
+    handover_tests();
+    authorization_tests();
+    authorized_handover_test();
     runtime_tests();
     std::cout << checks << " native observation/workflow checks passed\n";
     return 0;
