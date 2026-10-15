@@ -65,7 +65,7 @@
           }
         },
         "failures": {
-          "opening": "Offer relevant library propositions, allow custom failures, and explain that boundaries and recovery preferences are editable drafts requiring validation.",
+          "opening": "Introduce the failure-proposition selection as part of the conversation. Explain that the clickable library is grouped into broad failure types and specific subtypes, briefly name the available broad types supplied by the artifact, and invite the user to select all relevant propositions or describe a custom failure. Explain that every selection is added to their profile artifact and remains an editable draft requiring validation.",
           "opening_artifacts": ["proposition_library", "profile_propositions"],
           "actions": {
             "failure_description": {"description": "A failure or unsafe outcome was described.", "handler": "collect_failure", "artifacts": ["configuration_field", "proposition_library", "profile_propositions", "proposition_input_required"]},
