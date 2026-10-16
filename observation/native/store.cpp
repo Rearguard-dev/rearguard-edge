@@ -294,7 +294,7 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
       {"encoder", critic_feature_encoder},
       {"score_kind", "uncalibrated_cosine_similarity"},
       {"mode", "shadow"},
-      {"deployment_validated", false},
+      {"deployment_validated", compile_state == "ready_shadow"},
       {"executable", compile_state == "ready_shadow"},
       {"compile_state", compiled["compile_state"]}};
   state["critic_runtime_status"] = compiled["compile_state"];
@@ -825,29 +825,40 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
     const auto &detection = c.at("detection");
     const auto deployed_critic = s.value("critic_deployment", Json(nullptr));
     const bool validated_deployment =
+        detection.value("source", "") == "trained_critic" &&
         detection.value("deployment_validated", false) && deployed_critic.is_object() &&
         deployed_critic.value("deployment_validated", false) &&
-        detection.value("deployment_id", "") == deployed_critic.value("id", "");
+        detection.value("deployment_id", "") == deployed_critic.value("id", "") &&
+        detection.value("detector_id", "") == deployed_critic.value("id", "");
     if (validated_deployment) {
-      const auto evidence_class = detection.at("evidence_class").get<std::string>();
-      for (auto it = s["bundles"].begin(); it != s["bundles"].end(); ++it) {
-        const auto &bundle = it.value();
-        if (bundle.value("status", "") != "approved") continue;
-        const auto &contract = bundle.at("content").at("contract");
-        bool semantic_match = contract.value("evidence_class", "") == evidence_class;
-        if (!semantic_match && contract.contains("semantic_labels") &&
-            contract["semantic_labels"].is_array())
-          semantic_match = std::find(contract["semantic_labels"].begin(),
-                                     contract["semantic_labels"].end(),
-                                     Json(evidence_class)) !=
-                           contract["semantic_labels"].end();
-        if (!semantic_match) continue;
-        c["status"] = "approved_recovery_match";
-        c["approved_recovery_match"] = {
-            {"bundle_id", it.key()}, {"recovery", bundle["content"]["recovery"]},
-            {"match", contract.value("evidence_class", "") == evidence_class
-                          ? "exact" : "approved_semantic_alias"}};
-        break;
+      // Skipping operator approval is allowed only for an exact, high-confidence
+      // proposition match with an explicitly linked and still-approved recovery.
+      // Similar labels or unrelated approved bundles are never enough.
+      const auto proposition_id = detection.at("evidence_class").get<std::string>();
+      const auto proposition = s["propositions"].find(proposition_id);
+      if (detection.value("proposition_id", "") == proposition_id &&
+          proposition != s["propositions"].end() &&
+          detection.at("confidence").get<double>() >=
+              proposition.value().value("candidate_threshold", 0.95)) {
+        const auto recovery = proposition.value().value("recovery", Json(nullptr));
+        if (recovery.is_object()) {
+          const auto bundle_id = recovery.value("bundle_id", "");
+          const auto bundle = s["bundles"].find(bundle_id);
+          if (bundle != s["bundles"].end() &&
+              bundle.value().value("status", "") == "approved" &&
+              bundle.value().value("content_hash", "") ==
+                  recovery.value("content_hash", "")) {
+            c["status"] = "approved_recovery_match";
+            c["approved_recovery_match"] = {
+                {"proposition_id", proposition_id},
+                {"bundle_id", bundle_id},
+                {"content_hash", recovery["content_hash"]},
+                {"recovery", bundle.value()["content"]["recovery"]},
+                {"confidence", detection["confidence"]},
+                {"threshold", proposition.value().value("candidate_threshold", 0.95)},
+                {"match", "exact_proposition"}};
+          }
+        }
       }
     }
     return c;

@@ -258,10 +258,12 @@ public:
            {"missed_deadlines", missed_deadlines_[i]},
            {"receipt_ros_ns", observations.receipt_ros_ns}};
       if (confidence < head.value("candidate_threshold", 0.9)) continue;
-      if (!best || confidence > best->confidence)
+      if (!best || confidence > best->confidence) {
         best = Detection{deployment_["id"], head["proposition_id"], confidence,
-                         5, 2, "profile_proposition_bank_v1",
-                         deployment_["id"], false};
+                         10, 5, "trained_critic", deployment_["id"],
+                         deployment_.value("deployment_validated", false)};
+        best->proposition_id = head["proposition_id"].get<std::string>();
+      }
     }
     telemetry_["last_evaluation_us"] =
         static_cast<double>(monotonic_ns() - evaluation_started) / 1000.0;

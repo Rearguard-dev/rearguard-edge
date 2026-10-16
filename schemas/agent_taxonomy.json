@@ -149,11 +149,18 @@
       }
     },
     "incident_response": {
-      "description": "Capture an operator-reported incident, attach it to a failure proposition, collect recovery guidance, and start recovery generation.",
+      "description": "Capture and show synchronized incident evidence first; require operator approval unless a validated critic makes a high-confidence exact proposition match with a linked approved recovery.",
       "entry_step": "capture",
       "steps": {
-        "capture": { "opening": "Capture the incident window immediately, then ask the operator what happened.", "opening_artifacts": [], "actions": {
-          "report_incident": { "description": "The operator pressed Report incident and approved capture.", "next_step": "describe", "handler": "report_incident", "artifacts": ["workflow_command", "incident_workflow"] }
+        "capture": { "opening": "Capture an approximately fifteen-second incident window, then wait for synchronized evidence before asking the operator to classify it.", "opening_artifacts": [], "actions": {
+          "report_incident": { "description": "The operator requested evidence capture; this is not approval that a failure occurred.", "next_step": "awaiting_evidence", "handler": "report_incident", "artifacts": ["workflow_command", "incident_workflow"] }
+        }},
+        "awaiting_evidence": { "opening": "Wait until the exact MCAP evidence window is ready, then make its video, time series, commands and controller streams the primary review artifact.", "opening_artifacts": [], "actions": {
+          "continue_incident": { "description": "Check whether the synchronized evidence is ready for review.", "next_step": "evidence_review", "handler": "inspect_incident_evidence", "artifacts": ["incident_workflow"] }
+        }},
+        "evidence_review": { "opening": "Ask the operator to approve or reject the incident only after reviewing the synchronized evidence. Explain when a validated high-confidence proposition/recovery match has made approval unnecessary.", "opening_artifacts": [], "actions": {
+          "approve_incident": { "description": "The operator confirms that the reviewed evidence is a real incident.", "next_step": "describe", "handler": "state_only", "artifacts": [] },
+          "reject_incident": { "description": "The operator rejects the reviewed evidence as a failure.", "next_step": "complete", "handler": "reject_incident", "artifacts": ["workflow_command", "incident_workflow"] }
         }},
         "describe": { "opening": "Ask for a concise incident-level description of what happened.", "opening_artifacts": [], "actions": {
           "incident_described": { "description": "Store the operator's incident description and show failure propositions that it can be attached to.", "next_step": "attach", "handler": "capture_incident_description", "artifacts": ["incident_workflow", "incident_propositions"] }
@@ -163,13 +170,19 @@
           "new_proposition": { "description": "Create a new failure proposition from the operator's description.", "next_step": "guidance", "handler": "create_incident_proposition", "artifacts": ["incident_workflow"] }
         }},
         "guidance": { "opening": "Ask what the robot should do to recover safely from this specific failure.", "opening_artifacts": [], "actions": {
-          "guidance_provided": { "description": "Store the recovery guidance. Operator-triggered incident acceptance is already approved.", "next_step": "awaiting_evidence", "handler": "collect_incident_guidance", "artifacts": ["incident_workflow"] }
+          "guidance_provided": { "description": "Store recovery guidance after the operator has approved the reviewed evidence.", "next_step": "awaiting_acceptance", "handler": "collect_incident_guidance", "artifacts": ["incident_workflow"] }
         }},
-        "awaiting_evidence": { "opening": "Check capture readiness, accept the reported failure without another approval, then request recovery generation after edge acknowledgement.", "opening_artifacts": [], "actions": {
-          "continue_incident": { "description": "Continue the approved incident workflow after an edge sync.", "handler": "advance_incident", "artifacts": ["workflow_command", "incident_workflow", "recovery_generation"] }
+        "awaiting_acceptance": { "opening": "Apply the operator-approved classification and continue after the edge acknowledges it.", "opening_artifacts": [], "actions": {
+          "continue_incident": { "description": "Continue the explicitly approved incident workflow after an edge sync.", "next_step": "generating", "handler": "advance_incident", "artifacts": ["workflow_command", "incident_workflow", "recovery_generation"] }
         }},
         "generating": { "opening": "Report the current recovery-generation status and keep the incident artifacts synchronized.", "opening_artifacts": [], "actions": {
           "check_generation": { "description": "Check the recovery generation job and proposal status.", "handler": "check_incident_generation", "artifacts": ["incident_workflow", "recovery_generation"] }
+        }},
+        "automatic_recovery": { "opening": "Explain that a validated critic exceeded the proposition threshold and matched an exact proposition with a linked approved recovery; show the evidence and automatic-match details without requesting approval.", "opening_artifacts": [], "actions": {
+          "question": { "description": "Ask about the automatic recovery match or its evidence.", "handler": "state_only", "artifacts": [] }
+        }},
+        "complete": { "opening": "Explain that the reviewed incident was rejected and no failure or recovery change was made.", "opening_artifacts": [], "actions": {
+          "question": { "description": "Ask about the completed incident review.", "handler": "state_only", "artifacts": [] }
         }}
       }
     },
@@ -254,7 +267,9 @@
     "collect_failure": { "kind": "capture", "description": "Append a failure description to session state.", "requires": ["input.text"] },
     "replace_failures": { "kind": "capture", "description": "Replace the complete failure list in session state.", "requires": ["input.text"] },
     "collect_guidance": { "kind": "capture", "description": "Store recovery guidance in session state.", "requires": ["input.text"] },
-    "report_incident": { "kind": "mutation", "description": "Queue an operator-approved incident capture on the edge.", "requires": ["domain.robot_id", "domain.revision"] },
+    "report_incident": { "kind": "mutation", "description": "Queue an operator-requested incident capture on the edge without implying classification approval.", "requires": ["domain.robot_id", "domain.revision"] },
+    "inspect_incident_evidence": { "kind": "read", "description": "Wait for and expose the immutable synchronized evidence before classification.", "requires": ["domain.snapshot"] },
+    "reject_incident": { "kind": "mutation", "description": "Reject the reviewed incident candidate without creating a failure.", "requires": ["domain.robot_id", "domain.revision", "domain.snapshot"] },
     "capture_incident_description": { "kind": "capture", "description": "Store the incident-level description and return attachable propositions.", "requires": ["input.text", "domain.snapshot"] },
     "select_incident_proposition": { "kind": "capture", "description": "Select an existing edge failure proposition by exact ID.", "requires": ["input.proposition_id", "domain.snapshot.propositions"] },
     "create_incident_proposition": { "kind": "capture", "description": "Draft a new proposition to create as part of incident acceptance.", "requires": ["input.text"] },

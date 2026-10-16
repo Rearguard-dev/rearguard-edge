@@ -137,6 +137,7 @@ void recording_test(const fs::path &root) {
   require(compiled["critic_runtime_status"] == "ready_shadow" &&
               compiled["enforcement_status"] == "shadow" &&
               compiled["critic_deployment"]["executable"] == true &&
+              compiled["critic_deployment"]["deployment_validated"] == true &&
               compiled["critic_deployment"]["heads"][0]["centers"].size() == 1 &&
               std::find(compiled["placeholders"].begin(),
                         compiled["placeholders"].end(),

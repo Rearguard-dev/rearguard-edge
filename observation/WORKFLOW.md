@@ -136,11 +136,14 @@ wall seconds. If the clock stops during collection, the window becomes
 The authenticated web flow can now initiate the same capture with a
 revision-bound `report_incident` command. The workflow connector resolves the
 currently active observer session and publishes the capture request locally;
-the browser never supplies the ROS timestamps. The default UI window retains
-10 seconds before and 3 seconds after the edge mark. Its snapshot progresses
+the browser never supplies the ROS timestamps. The default UI window retains a
+synchronized 15-second window: 10 seconds before and 5 seconds after the edge
+mark. Its snapshot progresses
 through `incident_requests.<window-id>` from `collecting` to
 `preparing_evidence` and `ready`, at which point the linked candidate can be
-reviewed. The stable cloud request ID is persisted with the edge window before
+reviewed. The evidence snapshot is shown before classification, description,
+proposition attachment, or recovery guidance. An operator report is only a
+capture request and never implies approval. The stable cloud request ID is persisted with the edge window before
 acknowledgement, so connector retries recover that same mark instead of
 creating a second window; completed commands also replay their durable receipt.
 
@@ -173,6 +176,12 @@ field remains supported but does not assign the failure to a guard.
 `link_proposition_recovery` requires `proposition_id`, `bundle_id` and the exact
 approved `content_hash`; the bundle must originate from that proposition's
 accepted evidence. A link does not activate the controller.
+
+The only path that can bypass a new operator approval is a validated
+`trained_critic` detection whose exact proposition ID meets that proposition's
+candidate threshold and whose linked recovery still names an approved bundle
+with the exact stored content hash. Labels or semantically similar evidence
+classes cannot borrow another proposition's recovery authorization.
 
 `set_critic_context` accepts `{"context": <CriticContext v1>}` to store task and
 embodiment inputs. Context compilation verifies these against the observation
