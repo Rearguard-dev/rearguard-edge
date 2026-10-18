@@ -6,7 +6,7 @@
 namespace harness::observation {
 struct Detection {
   std::string detector_id, evidence_class;
-  double confidence = 0, before_s = 5, after_s = 2;
+  double confidence = 0, before_s = 10, after_s = 0;
   std::string source = "trained_critic";
   std::string deployment_id;
   bool deployment_validated = false;

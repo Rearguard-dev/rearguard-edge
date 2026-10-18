@@ -196,6 +196,11 @@ void evidence_tests() {
        {0.0, -1.0, 21.0, std::numeric_limits<double>::infinity(),
         std::numeric_limits<double>::quiet_NaN()})
     rejects([&] { e.capture(invalid, 3, "bad"); });
+  const auto &history = e.capture(10, 0, "history-only");
+  check(history["end_ns"] == history["mark_ns"] &&
+            history["mark_ns"].get<Ns>() - history["start_ns"].get<Ns>() ==
+                10000000000LL,
+        "history-only capture ends at the exact trigger timestamp");
   e.capture(1, 2, "reset");
   e.tick(1, 100);
   check(e.state["windows"].back()["status"] == "clock_reset",

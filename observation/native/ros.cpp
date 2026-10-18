@@ -420,10 +420,11 @@ class Observer {
     require(!detection_marks_.contains(key) ||
                 *evidence_.now - detection_marks_[key] >= 10000000000LL,
             "candidate detector is in its ten-second ROS cooldown");
-    auto &w = evidence_.capture(detection.at("before_s").get<double>(),
-                                detection.at("after_s").get<double>(),
-                                detection.at("evidence_class"));
-    w.update({{"trigger", "critic_candidate"}, {"detection", detection}});
+    auto canonical_detection = detection;
+    canonical_detection["before_s"] = 10.0;
+    canonical_detection["after_s"] = 0.0;
+    auto &w = evidence_.capture(10.0, 0.0, detection.at("evidence_class"));
+    w.update({{"trigger", "critic_candidate"}, {"detection", canonical_detection}});
     detection_marks_[key] = *evidence_.now;
     return w;
   }

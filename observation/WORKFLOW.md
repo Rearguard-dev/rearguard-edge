@@ -137,8 +137,7 @@ The authenticated web flow can now initiate the same capture with a
 revision-bound `report_incident` command. The workflow connector resolves the
 currently active observer session and publishes the capture request locally;
 the browser never supplies the ROS timestamps. The default UI window retains a
-synchronized 15-second window: 10 seconds before and 5 seconds after the edge
-mark. Its snapshot progresses
+synchronized 10-second history window ending at the edge mark. Its snapshot progresses
 through `incident_requests.<window-id>` from `collecting` to
 `preparing_evidence` and `ready`, at which point the linked candidate can be
 reviewed. The evidence snapshot is shown before classification, description,

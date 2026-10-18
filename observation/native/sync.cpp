@@ -297,8 +297,8 @@ Json run_workflow_sync(const Options &options, bool once) {
         {{"schema_version", 1},
          {"request_id", capture_request_id},
          {"operation", "capture"},
-         {"before", payload.value("before_s", 10.0)},
-         {"after", payload.value("after_s", 5.0)},
+         {"before", 10.0},
+         {"after", 0.0},
          {"label", required_text(payload.at("label"), "label")}},
         meta);
   };

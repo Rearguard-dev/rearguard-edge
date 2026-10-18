@@ -99,8 +99,8 @@ void Evidence::expire(Ns wall) {
 Json &Evidence::capture(double before, double after, const std::string &label) {
   require(now && *now > 0, "ROS clock has not started");
   require(std::isfinite(before) && std::isfinite(after) && before > 0 &&
-              before <= 20 && after > 0 && after <= 20,
-          "before and after must be finite, positive and at most 20 seconds");
+              before <= 20 && after >= 0 && after <= 20,
+          "before must be positive and after nonnegative; both must be at most 20 seconds");
   unsigned collecting = 0;
   for (const auto &w : state["windows"])
     if (w["status"] == "collecting")
