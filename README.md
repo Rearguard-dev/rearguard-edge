@@ -61,7 +61,7 @@ Override with `HARNESS_INSTALL_DIR`, pin a version with `./install.sh v0.2.0`.
 The release binary itself is precompiled. On a supported Ubuntu edge host, the
 installer uses apt to add missing ROS 2 Jazzy and MCAP runtime packages.
 
-The install includes the native dynamic critic compiler/runtime plus ROS
+The Linux x86_64 install includes the native dynamic critic compiler/runtime plus ROS
 discovery, observation, rosbag2, and MCAP recording support. It installs no
 bootstrap classifier. Critic inference remains dormant until the workflow
 contains both an explicit task/embodiment `critic_context` and at least one
@@ -202,7 +202,7 @@ Three version numbers move independently, on purpose:
   no protobuf symbols. A leaked C++ symbol would tie you to our compiler, our
   standard library and our exact protobuf version, which is the coupling the C
   ABI exists to prevent. `isolation_check.sh` asserts the surface on every
-  build, on both Linux and macOS.
+  build. Production edge releases target Linux x86_64.
 - **Fail closed.** A profile that violates any of the eleven structural
   constraints (C1–C11) is rejected, not accepted with a warning. `hk_create`
   re-validates defensively even though the CLI already did.

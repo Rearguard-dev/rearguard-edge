@@ -16,7 +16,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(harness_kernel
-        VERSION 0.4.11
+        VERSION 0.4.12
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 
@@ -225,6 +225,7 @@ endif()
 option(HARNESS_WITH_ROS2 "Build native ROS 2 observation and MCAP export (source Jazzy first)" OFF)
 add_library(harness_observation STATIC
   observation/native/common.cpp observation/native/store.cpp
+  observation/native/binding.cpp
   observation/native/evidence.cpp observation/native/runtime.cpp observation/native/sync.cpp
   observation/native/recording_upload.cpp
   observation/native/events.cpp observation/native/service.cpp
@@ -264,10 +265,6 @@ target_link_libraries(harness_cli PRIVATE
 target_compile_definitions(harness_cli PRIVATE
   HARNESS_CRITIC_LIB_DIR="${CMAKE_CURRENT_BINARY_DIR}"
   REARGUARD_VERSION="${PROJECT_VERSION}")
-foreach(HARNESS_OBSERVATION_BINDING so101.json g1_warehouse.json)
-  configure_file(observation/${HARNESS_OBSERVATION_BINDING}
-    share/harness/observation/${HARNESS_OBSERVATION_BINDING} COPYONLY)
-endforeach()
 
 # Learned critic tooling is native C++. Python training lives in models/critic.
 # CPU ONNX is useful for export parity; Jetson deployment uses TensorRT engines.
@@ -401,8 +398,6 @@ install(TARGETS harness_kernel harness_kernel_static harness_cli harness_critic 
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
 install(DIRECTORY include/harness DESTINATION include)
-install(FILES observation/so101.json observation/g1_warehouse.json
-        DESTINATION share/harness/observation)
 install(FILES runtime/edge-runtime.json DESTINATION share/harness/runtime)
 install(PROGRAMS scripts/install_runtime_deps.sh DESTINATION share/harness/install)
 

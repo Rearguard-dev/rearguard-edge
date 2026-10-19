@@ -40,6 +40,10 @@ if [ -z "${TARGET:-}" ]; then
   esac
   TARGET="${ARCH}-${OS_TAG}"
 fi
+[ "$TARGET" = "x86_64-linux-gnu" ] || {
+  echo "ERROR: edge releases support only x86_64-linux-gnu (got $TARGET)" >&2
+  exit 1
+}
 OUT=dist
 BUILD=build-release
 SCHEMAS_DIR=../schemas

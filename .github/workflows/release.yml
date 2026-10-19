@@ -1,8 +1,8 @@
 name: release
 
-# One workflow builds both Linux architectures the curl installer supports
-# from the same tag. Each tarball comes from scripts/build_artifact.sh with the
-# same tests, sanitizer pass, and manifest format.
+# The edge release supports one production target: Linux x86_64. Keeping one
+# artifact prevents architecture-specific builds from drifting from the robot
+# computers used in deployment and validation.
 
 on:
   push:
@@ -17,15 +17,7 @@ env:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            name: linux-x86_64
-          - os: ubuntu-24.04-arm
-            name: linux-arm64
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -82,12 +74,18 @@ jobs:
         run: |
           source /opt/ros/jazzy/setup.bash
           ./build-release/rearguard scan setup --domain-min 0 --domain-max 0 --settle-ms 1 --parallelism 1 --out "${RUNNER_TEMP}/scan.json"
-          tar -tzf dist/harness-kernel-*.tar.gz | grep -q '/share/harness/runtime/edge-runtime.json$'
-          tar -tzf dist/harness-kernel-*.tar.gz | grep -q '/share/harness/install/install_runtime_deps.sh$'
+          artifact="dist/harness-kernel-${GITHUB_REF_NAME#v}-x86_64-linux-gnu.tar.gz"
+          test -f "${artifact}"
+          tar -tzf "${artifact}" | grep -q '/share/harness/runtime/edge-runtime.json$'
+          tar -tzf "${artifact}" | grep -q '/share/harness/install/install_runtime_deps.sh$'
+          if tar -tzf "${artifact}" | grep -q '/share/harness/observation/'; then
+            echo "::error::release must not package embodiment-specific observation presets"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.name }}
+          name: dist-linux-x86_64
           path: dist/*
           if-no-files-found: error
 

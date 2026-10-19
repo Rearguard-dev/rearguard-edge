@@ -42,10 +42,13 @@ need tar
 # Must match build_artifact.sh's TARGET computation exactly — that string is
 # baked into the tarball and manifest filenames, so any drift here is a
 # download 404, not a subtle bug.
-ARCH="$(uname -m)"
 case "$(uname -s)" in
   Linux)  OS_TAG=linux-gnu ;;
   *)      err "Rearguard currently supports Linux edge computers only" ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) ARCH=x86_64 ;;
+  *) err "Rearguard edge releases currently support Linux x86_64 only" ;;
 esac
 TARGET="${ARCH}-${OS_TAG}"
 

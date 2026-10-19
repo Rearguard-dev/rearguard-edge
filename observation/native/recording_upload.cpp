@@ -151,6 +151,13 @@ void journal(const fs::path &path, Json &state, const std::string &relative,
   atomic_json(path, state);
 }
 
+unsigned upload_attempts(const Json &state, const std::string &relative) {
+  const auto &operations = state.at("operations");
+  if (!operations.contains(relative) || !operations.at(relative).is_object())
+    return 0U;
+  return operations.at(relative).value("attempts", 0U);
+}
+
 } // namespace
 
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
@@ -174,83 +181,7 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
   for (auto it = state["operations"].begin(); it != state["operations"].end(); ++it)
     if (it.value().value("status", "") == "submitted") uploaded.insert(it.key());
   unsigned count = 0;
-  for (const auto &segment : recording.at("segments")) {
-    const auto relative = segment.at("path").get<std::string>();
-    if (uploaded.contains(relative)) continue;
-    const auto file = mcap_file(session / relative);
-    const auto sha = file_hash(file);
-    const auto recording_id = digest({{"profile_id", profile_id},
-                                      {"session_id", session_meta.at("session_id")},
-                                      {"path", relative}, {"sha256", sha}});
-    Json modalities = Json::array();
-    const auto message_counts = segment.value("message_counts", Json::object());
-    for (const auto &topic : config.at("topics"))
-      modalities.push_back({
-          {"modality_key", digest({topic.at("name"), topic.at("type")})},
-          {"kind", modality_kind(topic)}, {"topic", topic.at("name")},
-          {"ros2_type", topic.at("type")}, {"message_encoding", "cdr"},
-          {"schema_encoding", "ros2msg"}, {"fields", Json::array()},
-          {"entities", Json::array()}, {"metadata", {{"role", topic.value("role", "custom")}}},
-          {"message_count", message_counts.value(topic.at("name").get<std::string>(), 0U)},
-          {"start_time_ns", segment.at("start_ns")},
-          {"end_time_ns", segment.at("end_ns")}});
-    // Observer lifecycle and command-processing events are written into every
-    // MCAP under the session-specific prefix. They are not part of the user's
-    // discovered topic configuration, so expose them explicitly as the
-    // incident controller/event log instead of leaving the stream invisible.
-    const auto events_topic = session_meta.at("prefix").get<std::string>() + "/events";
-    if (const auto event_count = message_counts.value(events_topic, 0U);
-        event_count > 0U)
-      modalities.push_back({
-          {"modality_key", digest({events_topic, "std_msgs/msg/String"})},
-          {"kind", "event"}, {"topic", events_topic},
-          {"ros2_type", "std_msgs/msg/String"}, {"message_encoding", "cdr"},
-          {"schema_encoding", "ros2msg"}, {"fields", Json::array()},
-          {"entities", Json::array()},
-          {"metadata", {{"role", "controller_log"}, {"source", "harness_observer"}}},
-          {"message_count", event_count},
-          {"start_time_ns", segment.at("start_ns")},
-          {"end_time_ns", segment.at("end_ns")}});
-    const Json payload = {
-        {"device_id", credentials.device_id}, {"profile_id", profile_id},
-        {"recording_id", recording_id}, {"sha256", sha},
-        {"size_bytes", fs::file_size(file)}, {"start_time_ns", segment.at("start_ns")},
-        {"end_time_ns", segment.at("end_ns")}, {"modalities", modalities},
-        {"manifest", {{"schema_version", 1}, {"session_id", session_meta.at("session_id")},
-                       {"segment", segment}}}};
-    try {
-      const auto previous_attempts = state["operations"][relative].value("attempts", 0U);
-      journal(state_path, state, relative, "pending",
-              {{"attempts", previous_attempts + 1U}, {"recording_id", recording_id},
-               {"sha256", sha}, {"size_bytes", fs::file_size(file)},
-               {"local_path", file.string()}, {"last_error", nullptr}});
-      bool already_complete = false;
-      try {
-        // Completion-first repairs an upload whose acknowledgement was lost.
-        backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
-        already_complete = true;
-      } catch (const std::exception &) {
-      }
-      if (!already_complete) {
-        const auto grant = backend_request(
-            credentials, "/harness-profiles/edge/recordings/upload", payload);
-        journal(state_path, state, relative, "uploading",
-                {{"object_key", grant.at("object_key")},
-                 {"grant_expires_at", grant.at("expires_at")}});
-        put_file(file, grant);
-        journal(state_path, state, relative, "uploaded_to_r2");
-        backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
-      }
-      journal(state_path, state, relative, "submitted");
-    } catch (const std::exception &error) {
-      journal(state_path, state, relative, "retrying",
-              {{"last_error", error.what()}});
-      throw;
-    }
-    uploaded.insert(relative);
-    ++count;
-  }
-  // The rolling segments above support general playback. Incident candidates,
+  // Prioritize incident evidence before rolling segments for general playback. Candidates,
   // however, reference a content-addressed MCAP exported to the exact evidence
   // window. Publish that artifact separately so the backend can join the
   // candidate evidence SHA to the recording and render the actual incident.
@@ -302,13 +233,92 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
                        {"session_id", session_meta.at("session_id")},
                        {"candidate_id", it.key()}, {"window", window}}}};
     try {
-      const auto previous_attempts = state["operations"][relative].value("attempts", 0U);
+      const auto previous_attempts = upload_attempts(state, relative);
       journal(state_path, state, relative, "pending",
               {{"attempts", previous_attempts + 1U}, {"recording_id", recording_id},
                {"sha256", sha}, {"size_bytes", fs::file_size(file)},
                {"local_path", file.string()}, {"last_error", nullptr}});
       bool already_complete = false;
       try {
+        backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
+        already_complete = true;
+      } catch (const std::exception &) {
+      }
+      if (!already_complete) {
+        const auto grant = backend_request(
+            credentials, "/harness-profiles/edge/recordings/upload", payload);
+        journal(state_path, state, relative, "uploading",
+                {{"object_key", grant.at("object_key")},
+                 {"grant_expires_at", grant.at("expires_at")}});
+        put_file(file, grant);
+        journal(state_path, state, relative, "uploaded_to_r2");
+        backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
+      }
+      journal(state_path, state, relative, "submitted");
+    } catch (const std::exception &error) {
+      journal(state_path, state, relative, "retrying",
+              {{"last_error", error.what()}});
+      throw;
+    }
+    uploaded.insert(relative);
+    ++count;
+  }
+  for (const auto &segment : recording.at("segments")) {
+    // Revisit the snapshot between background uploads so a newly exported
+    // incident cannot wait behind a whole session's recording backlog.
+    if (count > 0) break;
+    const auto relative = segment.at("path").get<std::string>();
+    if (uploaded.contains(relative)) continue;
+    const auto file = mcap_file(session / relative);
+    const auto sha = file_hash(file);
+    const auto recording_id = digest({{"profile_id", profile_id},
+                                      {"session_id", session_meta.at("session_id")},
+                                      {"path", relative}, {"sha256", sha}});
+    Json modalities = Json::array();
+    const auto message_counts = segment.value("message_counts", Json::object());
+    for (const auto &topic : config.at("topics"))
+      modalities.push_back({
+          {"modality_key", digest({topic.at("name"), topic.at("type")})},
+          {"kind", modality_kind(topic)}, {"topic", topic.at("name")},
+          {"ros2_type", topic.at("type")}, {"message_encoding", "cdr"},
+          {"schema_encoding", "ros2msg"}, {"fields", Json::array()},
+          {"entities", Json::array()}, {"metadata", {{"role", topic.value("role", "custom")}}},
+          {"message_count", message_counts.value(topic.at("name").get<std::string>(), 0U)},
+          {"start_time_ns", segment.at("start_ns")},
+          {"end_time_ns", segment.at("end_ns")}});
+    // Observer lifecycle and command-processing events are written into every
+    // MCAP under the session-specific prefix. They are not part of the user's
+    // discovered topic configuration, so expose them explicitly as the
+    // incident controller/event log instead of leaving the stream invisible.
+    const auto events_topic = session_meta.at("prefix").get<std::string>() + "/events";
+    if (const auto event_count = message_counts.value(events_topic, 0U);
+        event_count > 0U)
+      modalities.push_back({
+          {"modality_key", digest({events_topic, "std_msgs/msg/String"})},
+          {"kind", "event"}, {"topic", events_topic},
+          {"ros2_type", "std_msgs/msg/String"}, {"message_encoding", "cdr"},
+          {"schema_encoding", "ros2msg"}, {"fields", Json::array()},
+          {"entities", Json::array()},
+          {"metadata", {{"role", "controller_log"}, {"source", "harness_observer"}}},
+          {"message_count", event_count},
+          {"start_time_ns", segment.at("start_ns")},
+          {"end_time_ns", segment.at("end_ns")}});
+    const Json payload = {
+        {"device_id", credentials.device_id}, {"profile_id", profile_id},
+        {"recording_id", recording_id}, {"sha256", sha},
+        {"size_bytes", fs::file_size(file)}, {"start_time_ns", segment.at("start_ns")},
+        {"end_time_ns", segment.at("end_ns")}, {"modalities", modalities},
+        {"manifest", {{"schema_version", 1}, {"session_id", session_meta.at("session_id")},
+                       {"segment", segment}}}};
+    try {
+      const auto previous_attempts = upload_attempts(state, relative);
+      journal(state_path, state, relative, "pending",
+              {{"attempts", previous_attempts + 1U}, {"recording_id", recording_id},
+               {"sha256", sha}, {"size_bytes", fs::file_size(file)},
+               {"local_path", file.string()}, {"last_error", nullptr}});
+      bool already_complete = false;
+      try {
+        // Completion-first repairs an upload whose acknowledgement was lost.
         backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
         already_complete = true;
       } catch (const std::exception &) {
@@ -361,7 +371,7 @@ Json run_recording_uploader(const Options &options) {
     else if (fs::is_directory(sessions_root))
       for (const auto &entry : fs::directory_iterator(sessions_root))
         if (entry.is_directory()) sessions.push_back(entry.path());
-    std::sort(sessions.begin(), sessions.end());
+    std::sort(sessions.rbegin(), sessions.rend());
     for (const auto &candidate : sessions) {
       try {
         const auto result = upload_closed_recordings(store, candidate, credentials);

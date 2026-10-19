@@ -1,5 +1,6 @@
 #include "service.hpp"
 
+#include "binding.hpp"
 #include "events.hpp"
 #include "recording_upload.hpp"
 #include "store.hpp"
@@ -91,25 +92,30 @@ void write_status(const std::string &state, const Json &config, Json extra = Jso
   atomic_json(status_path(), value);
 }
 
-std::string config_for_embodiment(const std::string &embodiment) {
-  if (embodiment == "so101") return "so101";
-  if (embodiment == "g1") return "g1_warehouse";
-  return {};
-}
-
 Json load_or_empty(const fs::path &path) {
   try { return read_json(path); } catch (...) { return Json::object(); }
+}
+
+bool legacy_preset(const Json &value) {
+  if (!value.is_string()) return false;
+  const auto name = value.get<std::string>();
+  return name == "so101" || name == "so101_hardware" ||
+         name == "g1_warehouse";
+}
+
+bool pristine_workflow(const Json &snapshot) {
+  if (snapshot.value("revision", -1LL) != 0) return false;
+  for (const auto *field : {"incident_requests", "candidates", "failures",
+                            "jobs", "bundles", "deployments"})
+    if (snapshot.value(field, Json::object()).size() != 0) return false;
+  return true;
 }
 
 std::optional<Ns> selected_domain(const Json &config) {
   if (config.contains("domain_id") && config["domain_id"].is_number_integer())
     return config["domain_id"].get<Ns>();
   const auto inventory = load_or_empty(service_root() / "setup-inventory.json");
-  if (inventory.contains("available_domain_ids") &&
-      inventory["available_domain_ids"].is_array() &&
-      !inventory["available_domain_ids"].empty())
-    return inventory["available_domain_ids"][0].get<Ns>();
-  return std::nullopt;
+  return select_observation_domain(inventory);
 }
 
 void reap(pid_t &pid, const std::string &component) {
@@ -167,6 +173,15 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
   record_event("service", "started", "success", {{"pid", ::getpid()}});
   write_status("starting", config);
 
+  // Migrate releases that persisted a bundled embodiment preset. Those names
+  // are no longer runtime bindings; a fresh structural binding is compiled
+  // below from the authoritative setup inventory.
+  if (legacy_preset(config.value("observation_config", Json(nullptr)))) {
+    config["observation_config"] = nullptr;
+    atomic_json(config_path(), config);
+    record_event("observation_binding", "legacy_preset_cleared", "success");
+  }
+
   if (!fs::is_regular_file(service_root() / "setup-inventory.json"))
     scan_setup(config);
   Ns next_assignment = 0, next_scan = monotonic_ns() + 30000000000LL;
@@ -186,16 +201,9 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
         const auto assignment = fetch_device_assignment(credentials);
         if (assignment.value("assigned", false)) {
           const auto embodiment = assignment.at("embodiment_id").get<std::string>();
-          std::string selected;
-          if (!config.contains("observation_config") ||
-              config["observation_config"].is_null()) {
-            selected = config_for_embodiment(embodiment);
-            require(!selected.empty(), "no observation binding for assigned embodiment");
-          }
           config["robot_id"] = assignment.at("robot_id");
           config["profile_id"] = assignment.at("profile_id");
           config["embodiment"] = embodiment;
-          if (!selected.empty()) config["observation_config"] = selected;
           atomic_json(config_path(), config);
           record_event("assignment", "resolved", "success", assignment);
         } else {
@@ -214,6 +222,47 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
       scan_setup(config);
       next_scan = monotonic_ns() + 30000000000LL;
       domain = selected_domain(config);
+    }
+    if (domain && config.contains("robot_id") && config["robot_id"].is_string() &&
+        (!config.contains("observation_config") ||
+         config["observation_config"].is_null())) {
+      try {
+        const auto inventory = read_json(service_root() / "setup-inventory.json");
+        const auto binding = compile_observation_binding(
+            inventory, *domain, config.value("embodiment", "discovered"));
+        const auto path = service_root() / "bindings" /
+                          (config.value("profile_id", "profile") + ".json");
+        fs::create_directories(path.parent_path());
+        atomic_json(path, binding);
+        // Loading through the runtime validator makes the generated binding
+        // obey exactly the same contract as an explicitly supplied config.
+        (void)load_config(path);
+        config["observation_config"] = path.string();
+        const auto store = service_root() / "profiles" /
+                           config["robot_id"].get<std::string>();
+        if (fs::exists(store / "workflow.sqlite3")) {
+          const auto snapshot = Store(store).snapshot();
+          if (snapshot.value("binding_hash", "") != digest(binding)) {
+            require(pristine_workflow(snapshot),
+                    "accepted workflow state uses a different observation binding; explicit profile migration is required");
+            const auto backup = fs::path(store.string() + ".legacy-binding-" +
+                                         std::to_string(wall_ns()));
+            fs::rename(store, backup);
+            record_event("observation_binding", "pristine_store_migrated", "success",
+                         {{"backup", backup.string()},
+                          {"previous_binding_hash", snapshot.value("binding_hash", "")},
+                          {"binding_hash", digest(binding)}});
+          }
+        }
+        atomic_json(config_path(), config);
+        record_event("observation_binding", "compiled", "success",
+                     {{"path", path.string()}, {"domain_id", *domain},
+                      {"binding_hash", digest(binding)}});
+      } catch (const std::exception &error) {
+        record_event("observation_binding", "compile", "failure",
+                     {{"message", error.what()}, {"domain_id", *domain}});
+        write_status("waiting_for_ros", config, {{"message", error.what()}});
+      }
     }
     const bool configured = config.contains("robot_id") && config["robot_id"].is_string() &&
                             config.contains("observation_config") &&
@@ -266,6 +315,14 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
                         {"trained", critic.value("trained", false)}});
       }
       if (observer_pid <= 0) {
+        const auto available = fs::space(service_root()).available;
+        if (available < 1000000000ULL) {
+          write_status("storage_full", config,
+                       {{"available_bytes", available},
+                        {"error", "Recording paused: less than 1 GB free disk space. Free space before reporting an incident."}});
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+          continue;
+        }
         active_session = service_root() / "sessions" /
                          (std::to_string(wall_ns()) + "-d" + std::to_string(*domain));
         observer_pid = spawn({executable_path.string(), "observe", "start", "--config",

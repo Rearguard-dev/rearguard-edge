@@ -1,4 +1,5 @@
 #include "evidence.hpp"
+#include "binding.hpp"
 #include "events.hpp"
 #include "runtime.hpp"
 #include "controller_handover.hpp"
@@ -128,6 +129,56 @@ struct Fixture {
     return apply("deploy", {{"bundle_id", b["id"]}});
   }
 };
+
+void binding_tests() {
+  const Json idle_domain = {
+      {"domain_id", 0},
+      {"topics", Json::array({{{"name", "/rosout"},
+                                {"types", {"rcl_interfaces/msg/Log"}},
+                                {"sample", {{"status", "timeout"}}}}})}};
+  const Json robot_domain = {
+      {"domain_id", 71},
+      {"topics", Json::array({
+          {{"name", "/joint_states"},
+           {"types", {"sensor_msgs/msg/JointState"}},
+           {"publisher_count", 1},
+           {"sample", {{"status", "captured"},
+                       {"data", {{"name", {"j2", "j1"}}}}}}},
+          {{"name", "/controller/commands"},
+           {"types", {"std_msgs/msg/Float64MultiArray"}},
+           {"publisher_count", 0},
+           {"sample", {{"status", "unavailable"}}}},
+          {{"name", "/front/image_raw"},
+           {"types", {"sensor_msgs/msg/Image"}},
+           {"publisher_count", 1},
+           {"sample", {{"status", "captured"}}}},
+          {{"name", "/wrist/image_raw"},
+           {"types", {"sensor_msgs/msg/Image"}},
+           {"publisher_count", 1},
+           {"sample", {{"status", "captured"}}}},
+          {{"name", "/clock"},
+           {"types", {"rosgraph_msgs/msg/Clock"}},
+           {"publisher_count", 0},
+           {"sample", {{"status", "timeout"}}}}
+      })}};
+  const Json inventory = {{"captured_wall_ns", 123},
+                          {"domains", Json::array({idle_domain, robot_domain})}};
+  check(select_observation_domain(inventory) == 71,
+        "binding selects the structurally usable ROS domain");
+  const auto binding = compile_observation_binding(inventory, 71, "custom-arm");
+  check(binding["robot"] == "custom-arm" && binding["clock"] == "ros_system",
+        "binding uses assignment as metadata and infers a system clock");
+  check(binding["joint_order"] == Json::array({"j2", "j1"}),
+        "binding preserves observed joint order");
+  check(binding["topics"].size() == 4 &&
+            binding["topics"][1]["role"] == "action" &&
+            !binding["topics"][1]["required"].get<bool>(),
+        "unpublished command input remains optional evidence");
+  auto simulated = inventory;
+  simulated["domains"][1]["topics"][4]["sample"]["status"] = "captured";
+  check(compile_observation_binding(simulated, 71, "sim")["clock"] == "ros_sim",
+        "only a sampled advancing clock selects simulation time");
+}
 struct FakeCritic final : CriticAdapter {
   std::optional<Detection> detection = Detection{"tiny", "target_moved", 0.9};
   bool ready() const override { return true; }
@@ -784,6 +835,7 @@ int main() {
         digest(Json::object()) ==
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "SHA256 known vector");
+    binding_tests();
     evidence_tests();
     workflow_tests();
     handover_tests();

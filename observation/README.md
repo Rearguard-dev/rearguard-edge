@@ -203,13 +203,15 @@ artifact queries and still work after the observer stops.
 
 ## Physical robot and local VLA
 
-Copy `so101.json`, set `clock` to `ros_system`, and configure the robot's camera,
-joint and policy-output topic names, message types and joint order. Run in the
-robot's actual ROS domain and middleware environment. No Gazebo library,
-policy source import, action publisher, controller-manager service or actuator
-interface is used by this component. Task semantics are supplied by the
-operator at promotion; switching from the bench controller to a local VLA
-does not silently change that rule.
+The production service compiles its observation binding from the setup scan:
+the sampled joint-state topic and order, raw cameras, optional command stream,
+and an actually sampled `/clock` determine the binding. The accepted result is
+frozen per profile and hashed with its evidence; cloud embodiment labels never
+select a runtime preset. Explicit JSON files remain useful for isolated
+development and simulation rigs. Run in the robot's actual ROS domain and
+middleware environment. No Gazebo library, policy source import, action
+publisher, controller-manager service or actuator interface is required by
+the observation component.
 
 Implemented locally with core unit tests and a C++ CLI build. Live Jazzy
 recording and SO-101 perturbation acceptance remain to be run on Linux.

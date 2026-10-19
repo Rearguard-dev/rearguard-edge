@@ -80,8 +80,10 @@ The architecture and durable profile-sync contract are in
 
 `rearguard connect` starts one background supervisor after pairing and setup
 discovery. It waits until the web app assigns the device to a robot, resolves
-the packaged binding from that robot's embodiment, then keeps the observer and
-workflow sync connector running. A third supervised process drains closed MCAP
+the usable ROS domain, compiles and freezes a structural observation binding
+from the accepted setup inventory, then keeps the observer and workflow sync
+connector running. No embodiment name selects a packaged robot preset. A third
+supervised process drains closed MCAP
 segments to R2 from its durable local operation journal. It automatically creates the local workflow
 store, starts a fresh recording session after an observer restart, and exports
 candidate windows as soon as they are ready.
@@ -120,17 +122,15 @@ and SQLite profile transactions; a restart safely resends the full latest
 snapshot. Applied and rejected command receipts remain durable until upload,
 while request IDs make successfully applied commands idempotent.
 
-Installed clients can refer to the packaged robot binding by name, without a
-source checkout:
+Development rigs may still initialize a store from an explicit binding file:
 
 ```bash
-STORE="${XDG_STATE_HOME:-$HOME/.local/state}/rearguard/profiles/so101"
-rearguard workflow init --store "$STORE" --config so101
+STORE="${XDG_STATE_HOME:-$HOME/.local/state}/rearguard/profiles/dev-rig"
+rearguard workflow init --store "$STORE" --config ./binding.json
 ```
 
-The CLI resolves `so101` to the installation's
-`share/harness/observation/so101.json`. Set
-`REARGUARD_OBSERVATION_CONFIG_DIR` to override the packaged config directory.
+Production releases do not package embodiment-specific bindings. The service
+stores its generated, profile-frozen binding below the Rearguard state root.
 
 ## Where the binary comes from
 

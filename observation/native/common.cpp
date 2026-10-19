@@ -236,9 +236,9 @@ Json load_config(const fs::path &path) {
             "unsupported topic role/type");
     ++roles[role];
   }
-  require(roles["joint_state"] == 1 && roles["action"] == 1 &&
+  require(roles["joint_state"] == 1 && roles["action"] <= 1 &&
               roles["camera"] >= 1,
-          "configure one joint_state, one action and at least one camera");
+          "configure one joint_state, at most one action and at least one camera");
   names.clear();
   require(c.at("joint_order").is_array() && !c.at("joint_order").empty(),
           "joint_order must be nonempty");
