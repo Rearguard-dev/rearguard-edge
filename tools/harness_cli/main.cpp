@@ -998,6 +998,10 @@ int run_main(int argc, char** argv) {
 int main(int argc, char** argv) {
     harness::observation::set_service_executable(argv[0]);
     const int result = run_main(argc, argv);
+    // Uninstall removes the audit/state root itself. Recording the generic CLI
+    // completion event afterwards would recreate events.jsonl and make a
+    // successful uninstall leave Rearguard data behind.
+    if (argc > 1 && std::string(argv[1]) == "uninstall") return result;
     try {
         harness::observation::record_event(
             "cli", argc > 1 ? argv[1] : "usage", result == 0 ? "success" : "failure",

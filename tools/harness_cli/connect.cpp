@@ -662,8 +662,9 @@ int run_connect(const ConnectOptions& options) {
             const auto service = harness::observation::start_service_after_connect();
             harness::observation::record_event("service", "auto_start", "success", service);
             if (!options.json)
-                std::printf("  Harness service %s (inspect with `rearguard service status`).\n",
-                            service.value("status", "started").c_str());
+                std::printf("  Harness service verified running on ROS domain %lld "
+                            "(inspect with `rearguard service status`).\n",
+                            service.value("domain_id", -1LL));
         } catch (const std::exception& error) {
             harness::observation::record_event(
                 "service", "auto_start", "failure", {{"message", error.what()}});

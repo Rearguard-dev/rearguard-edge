@@ -7,10 +7,10 @@
 // rearguard on their PATH and no shell script to run. The uninstaller has
 // to be the thing they already have.
 //
-// It undoes exactly what install.sh does and nothing else -- the four
-// directories it unpacks, and the PATH block it appends to a shell rc file.
-// The two must be read side by side; if install.sh changes what it creates,
-// this changes with it.
+// It removes the four installed directories, the PATH block appended to shell
+// startup files, durable service state, recordings/workflow stores, and paired
+// device credentials. The two must be read side by side; if install.sh changes
+// what it creates, this changes with it.
 
 #ifndef HARNESS_CLI_UNINSTALL_HPP
 #define HARNESS_CLI_UNINSTALL_HPP

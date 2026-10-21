@@ -413,7 +413,12 @@ Json start(Json changes) {
   }
   for (int i = 0; i < 20 && !alive(read_pid()); ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  return {{"status", "started"}, {"pid", pid}, {"state_dir", service_root().string()}};
+  const auto service_pid = read_pid();
+  require(alive(service_pid),
+          "harness service exited during startup; inspect " +
+              (service_root() / "service.log").string());
+  return {{"status", "started"}, {"pid", service_pid},
+          {"state_dir", service_root().string()}};
 }
 } // namespace
 
@@ -430,19 +435,44 @@ void set_service_executable(const fs::path &path) {
 const fs::path &service_executable() { return executable_path; }
 
 Json start_service_after_connect() {
-  Json changes = Json::object();
   const auto credentials = load_or_empty(default_credentials_path());
-  if (credentials.contains("device_id") && credentials["device_id"].is_string()) {
-    const auto device_id = credentials["device_id"].get<std::string>();
-    const auto previous = load_or_empty(config_path());
-    if (previous.value("device_id", "") != device_id) {
-      stop_service_if_running();
-      changes = {{"device_id", device_id}, {"robot_id", nullptr},
-                 {"profile_id", nullptr},
-                 {"embodiment", nullptr}, {"observation_config", nullptr}};
-    }
+  require(credentials.contains("device_id") && credentials["device_id"].is_string(),
+          "paired device credentials are missing");
+  const auto device_id = credentials["device_id"].get<std::string>();
+  require(!device_id.empty(), "paired device ID is empty");
+
+  const auto inventory = load_or_empty(service_root() / "setup-inventory.json");
+  const auto domain = select_observation_domain(inventory);
+  require(domain.has_value(),
+          "completed setup inventory does not contain an active ROS domain");
+
+  const auto previous = load_or_empty(config_path());
+  Json changes{{"device_id", device_id}, {"domain_id", *domain}};
+  if (previous.value("device_id", "") != device_id) {
+    changes.update({{"robot_id", nullptr}, {"profile_id", nullptr},
+                    {"embodiment", nullptr}, {"observation_config", nullptr}});
+  } else if (previous.value("domain_id", -1LL) != *domain) {
+    // A binding compiled against another domain cannot silently survive a new
+    // authoritative discovery result.
+    changes["observation_config"] = nullptr;
   }
-  return start(changes);
+
+  // Always restart after connect so the running process consumes the freshly
+  // persisted inventory and pinned domain, even when the device identity did
+  // not change.
+  stop_service_if_running();
+  auto result = start(changes);
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  const auto service_pid = read_pid();
+  require(alive(service_pid),
+          "harness service did not remain alive after connect; inspect " +
+              (service_root() / "service.log").string());
+  const auto persisted = load_or_empty(config_path());
+  require(persisted.value("domain_id", -1LL) == *domain,
+          "harness service did not retain the discovered ROS domain");
+  result["domain_id"] = *domain;
+  result["verified_running"] = true;
+  return result;
 }
 
 Json stop_service_if_running() {
@@ -451,7 +481,8 @@ Json stop_service_if_running() {
   require(::kill(pid, SIGTERM) == 0, "could not stop harness service");
   for (int i = 0; i < 100 && alive(pid); ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  return {{"status", alive(pid) ? "stop_requested" : "stopped"}, {"pid", pid}};
+  require(!alive(pid), "harness service did not stop within 5 seconds");
+  return {{"status", "stopped"}, {"pid", pid}};
 }
 
 Json service_command(const Options &options) {

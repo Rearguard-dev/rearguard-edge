@@ -1,5 +1,6 @@
 #include "uninstall.hpp"
 #include "service.hpp"
+#include "events.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -104,6 +105,49 @@ bool looks_like_install_root(const fs::path& prefix, std::string& why_not) {
 std::string home_dir() {
     const char* home = std::getenv("HOME");
     return (home != nullptr) ? std::string(home) : std::string();
+}
+
+fs::path config_root() {
+    if (const char* value = std::getenv("XDG_CONFIG_HOME"); value && *value) {
+        return fs::absolute(value) / "rearguard";
+    }
+    const auto home = home_dir();
+    return home.empty() ? fs::path{} : fs::path(home) / ".config" / "rearguard";
+}
+
+bool safe_persistent_target(const fs::path& target, const fs::path& prefix,
+                            std::string& error) {
+    if (target.empty()) {
+        error = "persistent-data path is empty";
+        return false;
+    }
+    std::error_code ec;
+    const auto absolute = fs::absolute(target, ec).lexically_normal();
+    if (ec || absolute.empty() || absolute == absolute.root_path()) {
+        error = "refusing unsafe persistent-data path " + target.string();
+        return false;
+    }
+    const auto home = home_dir();
+    const auto absolute_home = home.empty() ? fs::path{} : fs::absolute(home, ec).lexically_normal();
+    if ((!absolute_home.empty() && absolute == absolute_home) || absolute == prefix) {
+        error = "refusing broad persistent-data path " + absolute.string();
+        return false;
+    }
+    std::size_t depth = 0;
+    for (const auto& component : absolute.relative_path()) {
+        (void)component;
+        ++depth;
+    }
+    const bool has_rearguard_marker =
+        fs::exists(absolute / "events.jsonl", ec) ||
+        fs::exists(absolute / "service" / "status.json", ec) ||
+        fs::exists(absolute / "device.json", ec);
+    if (absolute.filename() != "rearguard" &&
+        (depth < 3 || !has_rearguard_marker)) {
+        error = "refusing unrecognized persistent-data path " + absolute.string();
+        return false;
+    }
+    return true;
 }
 
 // Does this export line name <prefix>/bin?
@@ -279,6 +323,19 @@ int run_uninstall(const UninstallOptions& options) {
             targets.push_back(dir);
             file_count += count_entries(dir);
         }
+    }
+    const fs::path state = harness::observation::state_root();
+    const fs::path config = config_root();
+    for (const auto& persistent : {state, config}) {
+        std::error_code ec;
+        if (!fs::exists(persistent, ec)) continue;
+        std::string safety_error;
+        if (!safe_persistent_target(persistent, prefix, safety_error)) {
+            std::fprintf(stderr, "error: %s\n", safety_error.c_str());
+            return 1;
+        }
+        targets.push_back(persistent);
+        file_count += count_entries(persistent);
     }
     const std::vector<RcHit> rc_hits = find_rc_entries(prefix);
 

@@ -514,6 +514,8 @@ would remove 9 file(s) in:
   /Users/you/.harness/bin
   /Users/you/.harness/lib
   /Users/you/.harness/include
+  /Users/you/.local/state/rearguard
+  /Users/you/.config/rearguard
   /Users/you/.zshrc  (PATH entry: export PATH="/Users/you/.harness/bin:$PATH")
 
 Remove these? [y/N] y
@@ -528,10 +530,12 @@ restart your shell (or open a new one) so PATH no longer points there
 | `--yes` | Skip the confirmation prompt |
 | `--json` | Machine-readable result |
 
-**It undoes exactly what the installer did.** The four unpacked directories
-(`bin`, `lib`, `include`, `share`) and the `PATH` block appended to your shell
-rc — nothing else. The prefix directory itself is removed only if it is empty
-afterwards, since it may be a directory you use for other things.
+**It removes Rearguard completely from the edge.** That includes the four
+unpacked directories (`bin`, `lib`, `include`, `share`), the `PATH` block
+appended to shell startup files, durable service state and logs, recordings,
+workflow stores, setup inventories, and paired-device credentials. The prefix
+directory itself is removed only if it is empty afterwards, since it may be a
+directory you use for other things.
 
 Safety properties worth knowing, because this command deletes files:
 
@@ -540,6 +544,10 @@ Safety properties worth knowing, because this command deletes files:
   running it from a build tree, removes nothing and exits 1.
 - **It never `rm -rf`s the prefix.** Only the four known subdirectories are
   removed, by name.
+- **Persistent-data deletion is narrowly guarded.** The resolved state and
+  configuration roots cannot be `/`, the home directory, or the installation
+  prefix. Custom state roots must contain a Rearguard marker before recursive
+  deletion is allowed.
 - **Non-interactive input is not consent.** With no TTY and no `--yes` it
   aborts rather than reading EOF as "yes".
 - **It only removes a `PATH` line it can prove is its own** — the installer's
