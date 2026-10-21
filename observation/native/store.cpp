@@ -236,6 +236,15 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
     const std::string head_status =
         snapshots.empty() ? "unknown_no_examples" :
         centers.empty() ? "embedding_failed" : "ready";
+    bool capture_enabled = false;
+    const auto recovery = proposition.value("recovery", Json(nullptr));
+    if (recovery.is_object()) {
+      const auto bundle = state["bundles"].find(recovery.value("bundle_id", ""));
+      capture_enabled = bundle != state["bundles"].end() &&
+                        bundle.value().value("status", "") == "approved" &&
+                        bundle.value().value("content_hash", "") ==
+                            recovery.value("content_hash", "");
+    }
     if (head_status == "ready") ++ready_heads;
     state["propositions"][it.key()]["detector_status"] = head_status;
     heads.push_back({{"proposition_id", it.key()},
@@ -254,6 +263,7 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
         {"required_roles_mask", required_roles}, {"centers", centers},
         {"center_counts", center_counts},
         {"candidate_threshold", proposition.value("candidate_threshold", 0.95)},
+        {"capture_enabled", capture_enabled},
         {"score_kind", "uncalibrated_cosine_similarity"}});
     classes.push_back(it.key());
   }

@@ -149,25 +149,26 @@ recoveries. Stop here for this stage. Ctrl-C Terminal 1 closes the rosbag.
 
 The session contains `session.json` (bindings/domain/RMW/config), `state.json`
 (heartbeat, coverage, windows, failures, proposals), `events.jsonl` (audit
-events), and `rosbag2/` (closed recording segments containing received original
-messages, clock and audit events). `recording.json` indexes closed segments by
-clock epoch and timestamp. New runs default to MCAP (`--storage sqlite3` remains
-available); ROS needs its MCAP storage plugin for MCAP recording/export.
-Recording is continuous for this session; windows reference its timestamps.
-When started by the persistent post-connect service, every closed MCAP segment
-is discovered by a separately supervised uploader process and uses the
-asynchronous verified R2 flow in
+events), and `rosbag2/` (a bounded incident pre-roll containing received
+messages, clock and audit events). `recording.json` indexes the currently
+retained chunks by clock epoch and timestamp. New runs default to MCAP
+(`--storage sqlite3` remains available); ROS needs its MCAP storage plugin for
+MCAP recording/export. The observer rotates at two seconds or 32 MiB and
+retains only the latest ten seconds. A detected or operator-reported incident
+is exported as an exact content-addressed window. Only this incident artifact,
+not the rolling pre-roll, uses the asynchronous verified R2 flow in
 [`docs/r2-recording-pipeline.md`](../../docs/r2-recording-pipeline.md).
-`cloud-recordings.json` is a durable per-segment operation journal containing
+`cloud-recordings.json` is a durable per-incident operation journal containing
 attempt counts, local/object paths, grant expiry, state, and the last error.
-The first segment targets five seconds; later segments rotate at 30 seconds or
-96 MiB. Upload stalls therefore cannot block observation, workflow sync, or
-service status maintenance.
-Retain the entire directory. This first implementation has no automatic
-retention rotation: choose a bounded `--wall-timeout` and manage saved sessions.
-It checks free space and stops below 250 MB rather than intentionally filling
-the disk. Unclosed/crashed sessions must be treated as incomplete; check the
-heartbeat, observer status and rosbag integrity before relying on them.
+Upload stalls cannot block observation, workflow sync, service status
+maintenance, or pre-roll eviction. Inactive pre-roll is removed after all
+incident windows have been exported. Exact ten-second incident artifacts are
+the only durable edge recordings and remain available to the workflow for
+review, critic compilation, or recovery authoring.
+The uploader continues draining while capture is paused, and the observer
+resumes after free space rises above the 1 GiB safety floor.
+Unclosed/crashed sessions must be treated as incomplete; check the heartbeat,
+observer status and rosbag integrity before relying on them.
 
 Bag timestamps are ROS receipt time; original message headers preserve source
 time. Window coverage also records monotonic receipt times. Headerless action

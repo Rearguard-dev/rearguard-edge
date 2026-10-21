@@ -23,6 +23,7 @@ non-goal because **this table is it** — so anything you need to see about an
 episode, you see here.
 
 ```
+rearguard help
 rearguard validate <profile.yaml> [--json]
 rearguard show     <profile.yaml> [--json]
 rearguard replay   --profile <p.yaml> --trace <t.jsonl>
@@ -38,8 +39,14 @@ rearguard scan runtime --config <binding.json> --session <dir>
                        [--store <dir>] [--storage mcap|sqlite3]
                        --domain-id <n> [--wall-timeout 1800]
 rearguard abi
+rearguard start [service options]
+rearguard stop
+rearguard purge [--dry-run] [--yes] [--json]
 rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]
 ```
+
+`rearguard help` prints the complete command and subcommand reference with an
+example for every entry. `rearguard --help` is an alias.
 
 ### `scan setup` / `scan runtime`
 
@@ -110,6 +117,23 @@ State, sessions, the durable event journal, and the supervisor log live under
 `REARGUARD_STATE_DIR`). `service start --config ... --robot-id ... --domain-id
 ...` is available for isolated development rigs that are not assigned through
 the web app.
+
+The top-level lifecycle commands are operator-friendly aliases:
+
+```bash
+rearguard start                         # same as `rearguard service start`
+rearguard stop                          # same as `rearguard service stop`
+rearguard purge --dry-run               # inspect removable local state
+rearguard purge                         # confirm, stop, and remove local state
+```
+
+`purge` removes the complete state root: recordings, sessions, workflow stores,
+logs, setup inventories, generated bindings, and cached service configuration.
+It preserves the separately stored paired-device credential under
+`$XDG_CONFIG_HOME/rearguard` (normally `~/.config/rearguard`), so a subsequent
+`rearguard start` can resume without pairing again. `--yes` skips the prompt;
+`--json` emits a machine-readable result. Purge refuses broad or unrecognized
+state paths, and it stops the service before deleting anything.
 
 ### `workflow sync` / `workflow sync-once`
 

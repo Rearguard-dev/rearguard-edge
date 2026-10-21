@@ -5,7 +5,9 @@
 #include <sstream>
 namespace harness::observation {
 namespace {
-constexpr std::size_t kSegmentByteTarget = 96U * 1024U * 1024U;
+constexpr Ns kRetentionNs = 10000000000LL;
+constexpr Ns kSegmentDurationNs = 2000000000LL;
+constexpr std::size_t kSegmentByteTarget = 32U * 1024U * 1024U;
 
 rosbag2_storage::StorageOptions storage_options(const fs::path &path,
                                                 const std::string &storage) {
@@ -19,28 +21,28 @@ Recording::Recording(fs::path session, Json topics, std::string storage)
     : session_(std::move(session)), topics_(std::move(topics)),
       storage_(std::move(storage)) {
   atomic_json(session_ / "recording.json",
-              {{"schema_version", 1}, {"segments", segments_}});
+              {{"schema_version", 2},
+               {"mode", "incident_pre_roll"},
+               {"retention_ns", kRetentionNs},
+               {"segments", segments_}});
 }
 void Recording::write(const std::string &topic, const std::string &type,
                       std::shared_ptr<const rclcpp::SerializedMessage> data,
                       Ns now, Ns epoch) {
-  // Close the first segment quickly to prove the path during setup. Once the
-  // first artifact exists, use longer segments to avoid object/row explosion.
-  const Ns target_ns = segments_.empty() ? 5000000000LL : 30000000000LL;
   if (writer_ && (epoch != current_["epoch"].get<Ns>() ||
-                  now - current_["start_ns"].get<Ns>() >= target_ns ||
+                  now - current_["start_ns"].get<Ns>() >= kSegmentDurationNs ||
                   current_bytes_ >= kSegmentByteTarget))
     close();
   if (!writer_) {
     std::ostringstream name;
     name << "rosbag2/segment-" << std::setw(6) << std::setfill('0')
-         << segments_.size();
+         << next_segment_++;
     current_ = {{"epoch", epoch},
                 {"start_ns", now},
                 {"end_ns", now},
                 {"path", name.str()},
                 {"storage_id", storage_},
-                {"target_duration_ns", target_ns},
+                {"target_duration_ns", kSegmentDurationNs},
                 {"target_size_bytes", kSegmentByteTarget},
                 {"message_counts", Json::object()}};
     writer_ = std::make_unique<rosbag2_cpp::Writer>();
@@ -71,8 +73,34 @@ void Recording::close() {
   writer_.reset();
   current_["serialized_bytes"] = current_bytes_;
   segments_.push_back(current_);
+  prune(current_.at("end_ns").get<Ns>());
   atomic_json(session_ / "recording.json",
-              {{"schema_version", 1}, {"segments", segments_}});
+              {{"schema_version", 2},
+               {"mode", "incident_pre_roll"},
+               {"retention_ns", kRetentionNs},
+               {"segments", segments_}});
+}
+
+void Recording::prune(Ns newest_end_ns) {
+  const auto cutoff = newest_end_ns - kRetentionNs;
+  Json retained = Json::array();
+  for (const auto &segment : segments_) {
+    if (segment.at("epoch").get<Ns>() == current_.at("epoch").get<Ns>() &&
+        segment.at("end_ns").get<Ns>() >= cutoff) {
+      retained.push_back(segment);
+      continue;
+    }
+    const fs::path relative(segment.at("path").get<std::string>());
+    require(!relative.empty() && !relative.is_absolute(),
+            "recording segment path must be relative");
+    for (const auto &part : relative)
+      require(part != "..", "recording segment path may not escape session");
+    std::error_code error;
+    fs::remove_all(session_ / relative, error);
+    require(!error, "could not retire expired pre-roll segment: " +
+                        error.message());
+  }
+  segments_ = std::move(retained);
 }
 fs::path export_window(const fs::path &session, const Json &window,
                        const fs::path &destination) {

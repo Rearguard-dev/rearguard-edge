@@ -327,6 +327,22 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
                         {"runtime", critic.value("runtime", "unknown")},
                         {"trained", critic.value("trained", false)}});
       }
+      // Keep maintenance and incident uploads running when the safety floor
+      // pauses the observer. Inactive pre-roll cleanup is independent of cloud
+      // success, allowing storage_full to recover without intervention.
+      if (uploader_pid <= 0) {
+        std::vector<std::string> args{
+            executable_path.string(), "service", "uploader", "--store", store.string(),
+            "--sessions-root", (service_root() / "sessions").string(), "--credentials",
+            config.value("credentials", default_credentials_path().string()),
+            "--interval-ms", "2000"};
+        if (config.contains("backend_url"))
+          args.insert(args.end(), {"--backend-url", config["backend_url"].get<std::string>()});
+        uploader_pid = spawn(args);
+        record_event("recording_uploader", "started", "success",
+                     {{"pid", uploader_pid},
+                      {"sessions_root", (service_root() / "sessions").string()}});
+      }
       if (observer_pid <= 0) {
         const auto available = fs::space(service_root()).available;
         if (available < 1000000000ULL) {
@@ -346,19 +362,6 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
                      {{"pid", observer_pid}, {"domain_id", *domain},
                       {"session", active_session.string()}});
         active_critic_id = critic_id;
-      }
-      if (uploader_pid <= 0) {
-        std::vector<std::string> args{
-            executable_path.string(), "service", "uploader", "--store", store.string(),
-            "--sessions-root", (service_root() / "sessions").string(), "--credentials",
-            config.value("credentials", default_credentials_path().string()),
-            "--interval-ms", "2000"};
-        if (config.contains("backend_url"))
-          args.insert(args.end(), {"--backend-url", config["backend_url"].get<std::string>()});
-        uploader_pid = spawn(args);
-        record_event("recording_uploader", "started", "success",
-                     {{"pid", uploader_pid},
-                      {"sessions_root", (service_root() / "sessions").string()}});
       }
       export_pending_windows(store, active_session);
       write_status("running", config, {{"domain_id", *domain},

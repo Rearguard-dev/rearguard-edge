@@ -278,9 +278,16 @@ Json run_workflow_sync(const Options &options, bool once) {
   BackendTransport transport(credentials);
   auto capture_incident = [](const Json &command) {
     const auto status = read_json(state_root() / "service" / "status.json");
-    require(status.value("state", "") == "running" &&
-                status.contains("session") && status["session"].is_string(),
-            "incident capture requires a running observer session");
+    if (status.value("state", "") != "running" ||
+        !status.contains("session") || !status["session"].is_string()) {
+      // Surface the supervisor's actionable reason. A generic missing-session
+      // error hid conditions such as the disk safety floor from the operator.
+      const auto reason = status.value(
+          "error", status.value(
+                       "message",
+                       "incident capture requires a running observer session"));
+      throw std::runtime_error(reason);
+    }
     const auto session = fs::path(status["session"].get<std::string>());
     const auto meta = read_json(session / "session.json");
     const auto &payload = command.at("payload");

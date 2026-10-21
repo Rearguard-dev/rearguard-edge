@@ -87,6 +87,29 @@ void recording_test(const fs::path &root) {
   }
   require(count == 8, "export message count mismatch");
 
+  const auto retention_root = root / "retention";
+  fs::create_directories(retention_root / "rosbag2");
+  Recording bounded(retention_root, config["topics"]);
+  const auto &joint_topic = config["topics"].front();
+  sensor_msgs::msg::JointState joint;
+  joint.name = config["joint_order"].get<std::vector<std::string>>();
+  joint.position.assign(joint.name.size(), 0.0);
+  for (const Ns time : {0LL, 3000000000LL, 6000000000LL, 9000000000LL,
+                        12000000000LL, 15000000000LL})
+    bounded.write(joint_topic["name"].get<std::string>(),
+                  joint_topic["type"].get<std::string>(), serialize(joint),
+                  time, 1);
+  bounded.close();
+  const auto retained = read_json(retention_root / "recording.json");
+  require(retained.at("mode") == "incident_pre_roll" &&
+              retained.at("retention_ns") == 10000000000LL,
+          "recording did not declare bounded incident pre-roll");
+  for (const auto &segment : retained.at("segments"))
+    require(segment.at("end_ns").get<Ns>() >= 5000000000LL,
+            "recording retained data older than the ten-second pre-roll");
+  require(!fs::exists(retention_root / "rosbag2/segment-000000"),
+          "expired pre-roll segment was not reclaimed");
+
   const Json window = {{"id", "ros-compiled-window"},
                        {"status", "ready"}, {"epoch", 1},
                        {"start_ns", 1}, {"mark_ns", 2}, {"end_ns", 2}};

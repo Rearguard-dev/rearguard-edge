@@ -106,18 +106,6 @@ void put_file(const fs::path &file, const Json &grant) {
           "R2 MCAP upload returned HTTP " + std::to_string(status));
 }
 
-fs::path mcap_file(const fs::path &segment) {
-  std::vector<fs::path> files;
-  if (fs::is_regular_file(segment) && segment.extension() == ".mcap")
-    files.push_back(segment);
-  else if (fs::is_directory(segment))
-    for (const auto &entry : fs::recursive_directory_iterator(segment))
-      if (entry.is_regular_file() && entry.path().extension() == ".mcap")
-        files.push_back(entry.path());
-  require(files.size() == 1, "closed recording segment must contain one MCAP");
-  return files.front();
-}
-
 std::string modality_kind(const Json &topic) {
   const auto role = topic.value("role", "custom");
   if (role == "joint_state") return "joint_state";
@@ -158,6 +146,70 @@ unsigned upload_attempts(const Json &state, const std::string &relative) {
   return operations.at(relative).value("attempts", 0U);
 }
 
+std::uintmax_t directory_bytes(const fs::path &directory) {
+  std::uintmax_t bytes = 0;
+  if (!fs::is_directory(directory)) return bytes;
+  for (const auto &entry : fs::recursive_directory_iterator(directory))
+    if (entry.is_regular_file()) bytes += entry.file_size();
+  return bytes;
+}
+
+Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
+                              const Json &snapshot,
+                              const std::string &session_id) {
+  const auto state_path = session / "state.json";
+  if (!fs::is_regular_file(state_path))
+    return {{"pre_roll_retired", false}, {"reason", "session state missing"}};
+  const auto observation = read_json(state_path);
+  const auto heartbeat = observation.value("heartbeat_wall_ns", Ns{0});
+  const auto heartbeat_age = wall_ns() - heartbeat;
+  if (observation.value("status", "") == "observing" && heartbeat > 0 &&
+      heartbeat_age >= 0 && heartbeat_age < 30000000000LL)
+    return {{"pre_roll_retired", false}, {"reason", "observer active"}};
+
+  for (const auto &window : observation.value("windows", Json::array())) {
+    if (window.value("status", "") == "collecting")
+      return {{"pre_roll_retired", false},
+              {"reason", "incident window still requires export"}};
+    if (window.value("status", "") != "ready") continue;
+    bool exported = false;
+    for (auto it = snapshot.at("candidates").begin();
+         it != snapshot.at("candidates").end(); ++it)
+      if (it.value().value("session_id", "") == session_id &&
+          it.value().value("window", Json::object()).value("id", "") ==
+              window.value("id", "") &&
+          it.value().value("evidence", Json(nullptr)).is_object()) {
+        exported = true;
+        break;
+      }
+    if (!exported)
+      return {{"pre_roll_retired", false},
+              {"reason", "incident window still requires export"}};
+  }
+
+  for (auto it = snapshot.at("candidates").begin();
+       it != snapshot.at("candidates").end(); ++it)
+    if (it.value().value("session_id", "") == session_id &&
+        !it.value().value("evidence", Json(nullptr)).is_object())
+      return {{"pre_roll_retired", false},
+              {"reason", "candidate still requires evidence export"}};
+
+  const auto pre_roll = session / "rosbag2";
+  const auto reclaimed = directory_bytes(pre_roll);
+  std::error_code error;
+  fs::remove_all(pre_roll, error);
+  require(!error, "could not retire inactive incident pre-roll: " +
+                      error.message());
+  atomic_json(session / "recording.json",
+              {{"schema_version", 2},
+               {"mode", "incident_pre_roll"},
+               {"retention_ns", recording.value("retention_ns", 10000000000LL)},
+               {"segments", Json::array()},
+               {"retired_wall_ns", wall_ns()},
+               {"reclaimed_bytes", reclaimed}});
+  return {{"pre_roll_retired", true}, {"reclaimed_bytes", reclaimed}};
+}
+
 } // namespace
 
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
@@ -175,6 +227,12 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
   const auto config = session_meta.at("config");
   const auto snapshot = Store(store).snapshot();
   const auto profile_id = snapshot.at("profile_id").get<std::string>();
+  // Retention is local policy, not an upload acknowledgement policy. Retire
+  // inactive flight-recorder chunks before any network request so a cloud or
+  // profile failure can never grow the pre-roll into an archive again.
+  const auto retired = retire_inactive_pre_roll(
+      session, recording, snapshot,
+      session_meta.at("session_id").get<std::string>());
   const auto state_path = session / "cloud-recordings.json";
   auto state = load_state(state_path);
   std::set<std::string> uploaded;
@@ -263,86 +321,9 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
     uploaded.insert(relative);
     ++count;
   }
-  for (const auto &segment : recording.at("segments")) {
-    // Revisit the snapshot between background uploads so a newly exported
-    // incident cannot wait behind a whole session's recording backlog.
-    if (count > 0) break;
-    const auto relative = segment.at("path").get<std::string>();
-    if (uploaded.contains(relative)) continue;
-    const auto file = mcap_file(session / relative);
-    const auto sha = file_hash(file);
-    const auto recording_id = digest({{"profile_id", profile_id},
-                                      {"session_id", session_meta.at("session_id")},
-                                      {"path", relative}, {"sha256", sha}});
-    Json modalities = Json::array();
-    const auto message_counts = segment.value("message_counts", Json::object());
-    for (const auto &topic : config.at("topics"))
-      modalities.push_back({
-          {"modality_key", digest({topic.at("name"), topic.at("type")})},
-          {"kind", modality_kind(topic)}, {"topic", topic.at("name")},
-          {"ros2_type", topic.at("type")}, {"message_encoding", "cdr"},
-          {"schema_encoding", "ros2msg"}, {"fields", Json::array()},
-          {"entities", Json::array()}, {"metadata", {{"role", topic.value("role", "custom")}}},
-          {"message_count", message_counts.value(topic.at("name").get<std::string>(), 0U)},
-          {"start_time_ns", segment.at("start_ns")},
-          {"end_time_ns", segment.at("end_ns")}});
-    // Observer lifecycle and command-processing events are written into every
-    // MCAP under the session-specific prefix. They are not part of the user's
-    // discovered topic configuration, so expose them explicitly as the
-    // incident controller/event log instead of leaving the stream invisible.
-    const auto events_topic = session_meta.at("prefix").get<std::string>() + "/events";
-    if (const auto event_count = message_counts.value(events_topic, 0U);
-        event_count > 0U)
-      modalities.push_back({
-          {"modality_key", digest({events_topic, "std_msgs/msg/String"})},
-          {"kind", "event"}, {"topic", events_topic},
-          {"ros2_type", "std_msgs/msg/String"}, {"message_encoding", "cdr"},
-          {"schema_encoding", "ros2msg"}, {"fields", Json::array()},
-          {"entities", Json::array()},
-          {"metadata", {{"role", "controller_log"}, {"source", "harness_observer"}}},
-          {"message_count", event_count},
-          {"start_time_ns", segment.at("start_ns")},
-          {"end_time_ns", segment.at("end_ns")}});
-    const Json payload = {
-        {"device_id", credentials.device_id}, {"profile_id", profile_id},
-        {"recording_id", recording_id}, {"sha256", sha},
-        {"size_bytes", fs::file_size(file)}, {"start_time_ns", segment.at("start_ns")},
-        {"end_time_ns", segment.at("end_ns")}, {"modalities", modalities},
-        {"manifest", {{"schema_version", 1}, {"session_id", session_meta.at("session_id")},
-                       {"segment", segment}}}};
-    try {
-      const auto previous_attempts = upload_attempts(state, relative);
-      journal(state_path, state, relative, "pending",
-              {{"attempts", previous_attempts + 1U}, {"recording_id", recording_id},
-               {"sha256", sha}, {"size_bytes", fs::file_size(file)},
-               {"local_path", file.string()}, {"last_error", nullptr}});
-      bool already_complete = false;
-      try {
-        // Completion-first repairs an upload whose acknowledgement was lost.
-        backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
-        already_complete = true;
-      } catch (const std::exception &) {
-      }
-      if (!already_complete) {
-        const auto grant = backend_request(
-            credentials, "/harness-profiles/edge/recordings/upload", payload);
-        journal(state_path, state, relative, "uploading",
-                {{"object_key", grant.at("object_key")},
-                 {"grant_expires_at", grant.at("expires_at")}});
-        put_file(file, grant);
-        journal(state_path, state, relative, "uploaded_to_r2");
-        backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
-      }
-      journal(state_path, state, relative, "submitted");
-    } catch (const std::exception &error) {
-      journal(state_path, state, relative, "retrying",
-              {{"last_error", error.what()}});
-      throw;
-    }
-    uploaded.insert(relative);
-    ++count;
-  }
-  return {{"uploaded", count}, {"segments_seen", recording.at("segments").size()}};
+  return {{"uploaded", count},
+          {"incident_artifacts_only", true},
+          {"pre_roll", retired}};
 }
 
 Json run_recording_uploader(const Options &options) {

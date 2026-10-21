@@ -18,12 +18,14 @@
 #include "format/profile_table.hpp"
 #include "harness/harness_kernel.h"
 #include "harness/v1/enforcement.pb.h"
+#include "help.hpp"
 #include "mcap/reader.hpp"
 #include "profile/loader.hpp"
 #include "profile/validator.hpp"
 #include "replay/event_hash.hpp"
 #include "replay/replay.hpp"
 #include "replay/trace.hpp"
+#include "purge.hpp"
 #include "uninstall.hpp"
 #include "events.hpp"
 #include "service.hpp"
@@ -740,6 +742,7 @@ int cmd_diff(const std::string& path_a, const std::string& path_b, bool json) {
 void print_usage() {
     std::fprintf(stderr,
                   "usage:\n"
+                  "  rearguard help\n"
                   "  rearguard --version\n"
                   "  rearguard validate <profile.yaml> [--json]\n"
                   "  rearguard show <profile.yaml> [--json]\n"
@@ -752,6 +755,9 @@ void print_usage() {
                   "  rearguard abi\n"
                   "  rearguard connect [--name <device-name>] [--scan-settle-ms 5000] "
                   "[--scan-parallelism 16] [--json]\n"
+                  "  rearguard start [service options]\n"
+                  "  rearguard stop\n"
+                  "  rearguard purge [--dry-run] [--yes] [--json]\n"
                   "  rearguard service <start|status|stop> [options]\n"
                   "  rearguard events [--after N] [--follow] [--json]\n"
                   "  rearguard scan <setup|runtime> [options]\n"
@@ -778,6 +784,15 @@ int run_main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
 
+    if (cmd == "help" || cmd == "--help") {
+        if (!expect_exact_args(argc, 0, cmd.c_str())) {
+            print_usage();
+            return 1;
+        }
+        harness::cli::print_help();
+        return 0;
+    }
+
     if (cmd == "--version") {
         if (!expect_exact_args(argc, 0, "--version")) {
             print_usage();
@@ -789,6 +804,13 @@ int run_main(int argc, char** argv) {
 
     if (cmd == "scan" || cmd == "observe" || cmd == "workflow" || cmd == "service") {
         return harness::observation::command_main(cmd, argc - 2, argv + 2);
+    }
+
+    // Operator-friendly aliases. Keep the service group for backwards
+    // compatibility and scripting, while making the common lifecycle actions
+    // discoverable at the top level.
+    if (cmd == "start" || cmd == "stop") {
+        return harness::observation::command_main("service", argc - 1, argv + 1);
     }
 
     if (cmd == "events") {
@@ -987,6 +1009,23 @@ int run_main(int argc, char** argv) {
         return harness::cli::run_uninstall(opts);
     }
 
+    if (cmd == "purge") {
+        if (argc == 3 && std::string(argv[2]) == "--help") {
+            std::printf("rearguard purge [--dry-run] [--yes] [--json]\n");
+            return 0;
+        }
+        harness::cli::PurgeOptions opts;
+        FlagParser flags;
+        flags.add_bool("--dry-run", &opts.dry_run);
+        flags.add_bool("--yes", &opts.assume_yes);
+        flags.add_bool("--json", &opts.json);
+        if (!flags.parse(argc, argv, 2)) {
+            print_usage();
+            return 1;
+        }
+        return harness::cli::run_purge(opts);
+    }
+
     std::fprintf(stderr, "error: unknown command '%s'\n", cmd.c_str());
     if (cmd == "conect") {
         std::fprintf(stderr, "hint: did you mean 'rearguard connect'?\n");
@@ -998,10 +1037,13 @@ int run_main(int argc, char** argv) {
 int main(int argc, char** argv) {
     harness::observation::set_service_executable(argv[0]);
     const int result = run_main(argc, argv);
-    // Uninstall removes the audit/state root itself. Recording the generic CLI
-    // completion event afterwards would recreate events.jsonl and make a
-    // successful uninstall leave Rearguard data behind.
-    if (argc > 1 && std::string(argv[1]) == "uninstall") return result;
+    // Uninstall and purge remove the audit/state root itself. Recording the
+    // generic CLI completion event afterwards would recreate events.jsonl.
+    if (argc > 1 && (std::string(argv[1]) == "uninstall" ||
+                     std::string(argv[1]) == "purge" ||
+                     std::string(argv[1]) == "help" ||
+                     std::string(argv[1]) == "--help"))
+        return result;
     try {
         harness::observation::record_event(
             "cli", argc > 1 ? argv[1] : "usage", result == 0 ? "success" : "failure",

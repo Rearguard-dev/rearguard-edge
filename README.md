@@ -130,6 +130,7 @@ standalone commands remain available for diagnostics.
 inspect or compare the recorded episodes.
 
 ```
+rearguard help
 rearguard validate <profile.yaml> [--json]
 rearguard show     <profile.yaml> [--json]
 rearguard replay   --profile <p.yaml> --trace <t.jsonl>
@@ -139,6 +140,9 @@ rearguard hash     <profile.yaml> | --joints <j0,j1,j2> [--json]
 rearguard diff     <a.mcap> <b.mcap> [--json]
 rearguard scan     <setup|runtime> [options]
 rearguard service  <start|status|stop> [options]
+rearguard start    [service options]      # alias for service start
+rearguard stop                            # alias for service stop
+rearguard purge    [--dry-run] [--yes] [--json]
 rearguard events   [--after N] [--follow] [--json]
 rearguard abi
 rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]

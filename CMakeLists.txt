@@ -262,6 +262,8 @@ endif()
 add_executable(harness_cli
   tools/harness_cli/main.cpp
   tools/harness_cli/connect.cpp
+  tools/harness_cli/help.cpp
+  tools/harness_cli/purge.cpp
   tools/harness_cli/uninstall.cpp)
 set_target_properties(harness_cli PROPERTIES OUTPUT_NAME rearguard)
 target_include_directories(harness_cli PRIVATE src tools/harness_cli)
@@ -315,6 +317,10 @@ target_link_libraries(harness_critic PRIVATE harness_tiny_critic harness_flags)
 option(HARNESS_BUILD_TESTS "Build tests" ON)
 if(HARNESS_BUILD_TESTS)
   enable_testing()
+  add_test(NAME harness_cli_lifecycle_tests
+    COMMAND ${CMAKE_COMMAND}
+      -DCLI=$<TARGET_FILE:harness_cli>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_lifecycle_test.cmake)
   add_executable(harness_tiny_critic_tests tests/unit/tiny_critic_test.cpp)
   target_link_libraries(harness_tiny_critic_tests PRIVATE harness_tiny_critic harness_flags)
   add_test(NAME harness_tiny_critic_tests COMMAND harness_tiny_critic_tests)

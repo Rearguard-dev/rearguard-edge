@@ -8,7 +8,10 @@ class Recording {
   Json topics_, segments_ = Json::array(), current_;
   std::string storage_;
   std::size_t current_bytes_ = 0;
+  std::size_t next_segment_ = 0;
   std::unique_ptr<rosbag2_cpp::Writer> writer_;
+
+  void prune(Ns newest_end_ns);
 
 public:
   Recording(fs::path session, Json topics, std::string storage = "mcap");

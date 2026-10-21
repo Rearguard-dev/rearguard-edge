@@ -168,6 +168,12 @@ public:
     const auto evaluation_started = monotonic_ns();
     for (std::size_t i = 0; i < deployment_["heads"].size(); ++i) {
       const auto &head = deployment_["heads"][i];
+      if (!head.value("capture_enabled", false)) {
+        telemetry_["scores"][head["proposition_id"].get<std::string>()] =
+            {{"status", "inactive"}, {"probability", nullptr},
+             {"reason", "approved_recovery_required"}};
+        continue;
+      }
       if (head["centers"].empty()) {
         telemetry_["scores"][head["proposition_id"].get<std::string>()] =
             {{"status", "unknown"}, {"probability", nullptr},
