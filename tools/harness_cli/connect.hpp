@@ -10,7 +10,7 @@ namespace harness::cli {
 struct ConnectOptions {
     std::string device_name;
     bool json = false;
-    int scan_settle_ms = 750;
+    int scan_settle_ms = 5000;
     int scan_parallelism = 16;
 };
 

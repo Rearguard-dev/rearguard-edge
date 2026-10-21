@@ -138,6 +138,17 @@ std::string response_message(const HttpResult& result) {
     return "server returned HTTP " + std::to_string(result.status);
 }
 
+bool retryable_report_failure(const HttpResult& result) {
+    if (!result.error.empty() || result.status == 408 || result.status == 425 ||
+        result.status == 429 || result.status >= 500)
+        return true;
+    const auto message = response_message(result);
+    return message.find("statement timeout") != std::string::npos ||
+           message.find("canceling statement") != std::string::npos ||
+           message.find("deadlock detected") != std::string::npos ||
+           message.find("serialization failure") != std::string::npos;
+}
+
 Json first_row(const HttpResult& result) {
     if (result.status < 200 || result.status >= 300) return {};
     try {
@@ -165,8 +176,14 @@ bool report_scan_event(const std::string& api_url, const std::string& anon_key,
                  {"p_domain_max", domain_max < 0 ? Json(nullptr) : Json(domain_max)},
                  {"p_payload", payload},
                  {"p_error_message", error.empty() ? Json(nullptr) : Json(error)}};
-    const auto result = post_rpc(api_url, anon_key, "report_device_setup_scan", request);
-    if (result.status >= 200 && result.status < 300) return true;
+    HttpResult result;
+    constexpr int kAttempts = 4;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        result = post_rpc(api_url, anon_key, "report_device_setup_scan", request);
+        if (result.status >= 200 && result.status < 300) return true;
+        if (attempt + 1 == kAttempts || !retryable_report_failure(result)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250 * (1 << attempt)));
+    }
     if (emit_error) {
         std::fprintf(stderr, "error: could not stream setup scan event: %s\n",
                      response_message(result).c_str());
@@ -186,6 +203,24 @@ harness::observation::Options scan_options(int first, int last, int settle_ms,
     return harness::observation::Options(static_cast<int>(argv.size()), argv.data());
 }
 
+Json progress_payload(const Json& batch) {
+    Json compact = batch;
+    compact.erase("inventory_hash");
+    if (!compact.contains("domains") || !compact["domains"].is_array()) return compact;
+    for (auto& domain : compact["domains"]) {
+        if (!domain.contains("topics") || !domain["topics"].is_array()) continue;
+        for (auto& topic : domain["topics"]) {
+            if (!topic.contains("sample") || !topic["sample"].is_object()) continue;
+            auto& sample = topic["sample"];
+            sample.erase("image");
+            sample.erase("compressed_image");
+            sample.erase("cdr_hex");
+            sample.erase("series");
+        }
+    }
+    return compact;
+}
+
 int run_automatic_setup_scan(const ConnectOptions& options, const std::string& api_url,
                              const std::string& anon_key, const std::string& device_id,
                              const std::string& secret) {
@@ -193,6 +228,11 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
     constexpr int kLastDomain = 232;
     constexpr int kDomainCount = kLastDomain - kFirstDomain + 1;
     const int batch_size = options.scan_parallelism;
+    // DDS discovery is asynchronous. A sub-second locator can miss an active
+    // graph, especially while several domain participants start concurrently.
+    // Connect is a one-time operation, so never use less than the same robust
+    // window as the isolated confirmation scan.
+    const int discovery_settle_ms = std::max(options.scan_settle_ms, 5000);
     const std::string scan_id = harness::observation::unique_id();
     int sequence = 0;
 
@@ -208,8 +248,8 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
         std::printf("  %s›%s %s3.%s Discovering the ROS 2 graph automatically\n",
                     paint(color, "\033[1;36m"), paint(color, "\033[0m"),
                     paint(color, "\033[1m"), paint(color, "\033[0m"));
-        std::printf("    Domains 0–232 · %d concurrent · %d ms discovery window\n",
-                    batch_size, options.scan_settle_ms);
+        std::printf("    Domains 0–232 in order · %d concurrent · %d ms discovery window\n",
+                    batch_size, discovery_settle_ms);
         std::fflush(stdout);
     }
 
@@ -221,14 +261,18 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
                    {"captured_wall_ns", 0},
                    {"scan", {{"domain_min", kFirstDomain},
                               {"domain_max", kLastDomain},
-                              {"settle_ms", options.scan_settle_ms},
-                              {"parallelism", batch_size}}},
+                              {"settle_ms", discovery_settle_ms},
+                              {"parallelism", batch_size},
+                              {"mode", "first_active"}}},
                    {"available_domain_ids", Json::array()},
                    {"domains", Json::array()},
                    {"ros", nullptr},
                    {"device", nullptr}};
     try {
-        for (int first = kFirstDomain; first <= kLastDomain; first += batch_size) {
+        bool found = false;
+        for (int first = kFirstDomain;
+             first <= kLastDomain && !found;
+             first += batch_size) {
             const int last = std::min(kLastDomain, first + batch_size - 1);
             if (!options.json && is_interactive()) {
                 const bool color = supports_color();
@@ -245,19 +289,16 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
                 std::printf("] %3d%%  scanning domains %d–%d", before_progress, first, last);
                 std::fflush(stdout);
             }
-            auto batch_options = scan_options(first, last, options.scan_settle_ms, batch_size);
+            auto batch_options = scan_options(first, last, discovery_settle_ms, batch_size);
             auto batch = harness::observation::ros_discover(batch_options);
             if (inventory["ros"].is_null()) inventory["ros"] = batch["ros"];
             if (inventory["device"].is_null()) inventory["device"] = batch["device"];
-            for (const auto& id : batch["available_domain_ids"])
-                inventory["available_domain_ids"].push_back(id);
-            for (const auto& domain : batch["domains"])
-                inventory["domains"].push_back(domain);
 
             const int progress = ((last + 1) * 100) / kDomainCount;
             ++sequence;
+            const auto progress_inventory = progress_payload(batch);
             synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
-                                       sequence, "scanning", progress, batch, first, last,
+                                       sequence, "scanning", progress, progress_inventory, first, last,
                                        {}, synced) &&
                      synced;
             if (options.json) {
@@ -280,60 +321,35 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
                 std::printf("] %3d%%  scanned domains %d–%d", progress, first, last);
                 std::fflush(stdout);
             }
-        }
 
-        // The broad parallel sweep is only a domain locator. Do not use its
-        // partial graph snapshots as inventory: different DDS participants can
-        // become visible at different points in that short window. Re-scan each
-        // candidate domain in isolation and make that longer, single-context
-        // result the sole authoritative inventory.
-        std::set<int> confirmation_domains;
-        for (const auto& id : inventory["available_domain_ids"])
-            if (id.is_number_integer()) confirmation_domains.insert(id.get<int>());
-        if (const char* configured = std::getenv("ROS_DOMAIN_ID")) {
-            char* end = nullptr;
-            errno = 0;
-            const long value = std::strtol(configured, &end, 10);
-            if (errno == 0 && end != configured && *end == '\0' &&
-                value >= kFirstDomain && value <= kLastDomain)
-                confirmation_domains.insert(static_cast<int>(value));
-        }
-        const int confirmation_settle_ms = std::max(options.scan_settle_ms, 5000);
-        inventory["scan"]["mode"] = "locate_then_inventory";
-        inventory["scan"]["locator"] = {
-            {"domain_min", kFirstDomain},
-            {"domain_max", kLastDomain},
-            {"settle_ms", options.scan_settle_ms},
-            {"parallelism", batch_size}};
-        inventory["scan"]["inventory"] = {
-            {"settle_ms", confirmation_settle_ms},
-            {"parallelism", 1},
-            {"candidate_domain_ids", Json::array()}};
-        for (const int domain_id : confirmation_domains)
-            inventory["scan"]["inventory"]["candidate_domain_ids"].push_back(domain_id);
-        Json confirmed_domains = Json::array();
-        for (const int domain_id : confirmation_domains) {
-            if (!options.json) {
-                std::printf("\r\033[K    Verifying active domain %d · %d ms thorough scan\n",
-                            domain_id, confirmation_settle_ms);
-                std::fflush(stdout);
+            // Confirm candidates in numeric order and stop at the first domain
+            // that survives a full isolated scan. The environment's
+            // ROS_DOMAIN_ID is intentionally irrelevant: connect discovers the
+            // active graph without asking the operator for its domain.
+            std::set<int> candidates;
+            for (const auto& id : batch["available_domain_ids"])
+                if (id.is_number_integer()) candidates.insert(id.get<int>());
+            for (const int domain_id : candidates) {
+                if (!options.json) {
+                    std::printf("\r\033[K    Verifying first active domain %d · %d ms thorough scan\n",
+                                domain_id, discovery_settle_ms);
+                    std::fflush(stdout);
+                }
+                auto confirmation_options =
+                    scan_options(domain_id, domain_id, discovery_settle_ms, 1);
+                auto confirmation = harness::observation::ros_discover(confirmation_options);
+                if (!confirmation.contains("domains") || confirmation["domains"].empty())
+                    continue;
+                inventory["ros"] = confirmation["ros"];
+                inventory["device"] = confirmation["device"];
+                inventory["available_domain_ids"] = Json::array({domain_id});
+                inventory["domains"] = Json::array({confirmation["domains"].front()});
+                inventory["scan"]["selected_domain_id"] = domain_id;
+                inventory["scan"]["searched_through_domain_id"] = last;
+                found = true;
+                break;
             }
-            auto confirmation_options =
-                scan_options(domain_id, domain_id, confirmation_settle_ms, 1);
-            auto confirmation = harness::observation::ros_discover(confirmation_options);
-            if (!confirmation.contains("domains") || confirmation["domains"].empty())
-                continue;
-            for (const auto& confirmed_domain : confirmation["domains"])
-                confirmed_domains.push_back(confirmed_domain);
         }
-        inventory["domains"] = std::move(confirmed_domains);
-        std::set<int> available_domains;
-        for (const auto& domain : inventory["domains"])
-            if (domain.contains("domain_id") && domain["domain_id"].is_number_integer())
-                available_domains.insert(domain["domain_id"].get<int>());
-        inventory["available_domain_ids"] = Json::array();
-        for (const int domain_id : available_domains)
-            inventory["available_domain_ids"].push_back(domain_id);
 
         inventory["captured_wall_ns"] = harness::observation::wall_ns();
         inventory["inventory_hash"] = harness::observation::digest(inventory);
@@ -377,15 +393,17 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
             return 1;
         }
         ++sequence;
-        synced = report_scan_event(api_url, anon_key, device_id, secret, scan_id,
-                                   sequence, "completed", 100, inventory, -1, -1, {},
-                                   synced) &&
-                 synced;
+        // Progress events are best-effort UI updates. The authoritative final
+        // inventory is independently idempotent and determines whether setup
+        // sync succeeded; an earlier transient failure must not poison it.
+        const bool final_synced = report_scan_event(
+            api_url, anon_key, device_id, secret, scan_id, sequence,
+            "completed", 100, inventory, -1, -1, {}, true);
         if (options.json) {
             std::printf("%s\n", Json{{"status", "scan_completed"},
                                       {"scan_id", scan_id},
                                       {"sequence", sequence},
-                                      {"synced", synced},
+                                      {"synced", final_synced},
                                       {"inventory", inventory}}
                                      .dump()
                                      .c_str());
@@ -396,7 +414,7 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
                         paint(supports_color(), "\033[0m"),
                         paint(supports_color(), "\033[1m"),
                         paint(supports_color(), "\033[0m"), inventory["domains"].size());
-            if (synced) {
+            if (final_synced) {
                 std::printf("  %s✓%s %s4.%s Discovery profile synced\n\n",
                             paint(supports_color(), "\033[1;32m"),
                             paint(supports_color(), "\033[0m"),
@@ -413,7 +431,7 @@ int run_automatic_setup_scan(const ConnectOptions& options, const std::string& a
                             paint(supports_color(), "\033[0m"));
             }
         }
-        return synced ? 0 : 1;
+        return final_synced ? 0 : 1;
     } catch (const std::exception& cause) {
         std::string message = cause.what();
         if (message.size() > 1000) message.resize(1000);

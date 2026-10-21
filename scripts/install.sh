@@ -116,6 +116,16 @@ step "Installing ROS 2 Jazzy recording runtime when needed"
 "$EXTRACTED_RUNTIME_INSTALLER" --check
 okay "ROS 2 and MCAP recording are ready"
 
+# An upgrade must not leave the previous executable mapped into a running
+# supervisor after its files are replaced. Stop it with the installed CLI
+# first; a missing/stopped service is a successful no-op.
+EXISTING_BIN="$INSTALL_DIR/bin/rearguard"
+if [ -x "$EXISTING_BIN" ]; then
+  step "Stopping the existing Rearguard service for upgrade"
+  "$EXISTING_BIN" service stop >/dev/null \
+    || err "could not stop the existing Rearguard service"
+fi
+
 mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/bin" "$INSTALL_DIR/lib" "$INSTALL_DIR/include" "$INSTALL_DIR/share"
 cp -r "$EXTRACTED_ROOT/." "$INSTALL_DIR/"
@@ -142,6 +152,20 @@ okay "Dynamic proposition critic compiler/runtime is installed"
 grep -q '"critic_activation"[[:space:]]*:[[:space:]]*"after_profile_setup"' "$RUNTIME_CONTRACT" \
   || err "release permits critic activation before profile setup"
 okay "Critic inference is gated on completed profile setup"
+
+# State and pairing credentials intentionally survive uninstall/reinstall. A
+# successful install must restore the supervisor that owns those durable files,
+# rather than leave a configured robot silently stopped. On a first install the
+# same service starts in its waiting-for-pairing/assignment state.
+step "Starting Rearguard service"
+"$BIN" service start >/dev/null \
+  || err "installed CLI could not start the Rearguard service"
+SERVICE_STATUS="$("$BIN" service status)" \
+  || err "could not verify the Rearguard service after startup"
+printf '%s\n' "$SERVICE_STATUS" | \
+  grep -q '"running"[[:space:]]*:[[:space:]]*true' \
+  || err "Rearguard service did not remain running after startup; inspect $HOME/.local/state/rearguard/service/service.log"
+okay "Rearguard service is running"
 
 # Persist the path in login and interactive shell startup files. A script
 # executed through `curl | sh` cannot mutate its parent shell; the public

@@ -58,8 +58,9 @@ The first received message for each topic is frozen in its `sample` field;
 subscriptions are destroyed at the end of the window. Silent topics report
 `timeout`, and missing type support or size limits report `unavailable`.
 Common raw camera encodings (`rgb8`, `bgr8`, `rgba8`, `bgra8`, `mono8`) include
-an RGB preview up to 320 × 240. Compressed camera messages retain JPEG or PNG
-frames up to 2 MiB for the same one-shot preview. Camera samples use a separate
+an RGB preview up to 160 × 120. Compressed camera messages retain JPEG or PNG
+frames up to 256 KiB for the same one-shot preview. Larger frames remain valid
+captured samples but omit their inline visual preview. Camera samples use a separate
 16 MiB preview budget so ordinary topic samples cannot crowd them out. Joint
 states and strings include decoded values; other types include up to 4 KiB of
 CDR bytes as hex and share a 2 MiB budget per domain. Services and actions are
@@ -87,6 +88,13 @@ supervised process drains closed MCAP
 segments to R2 from its durable local operation journal. It automatically creates the local workflow
 store, starts a fresh recording session after an observer restart, and exports
 candidate windows as soon as they are ready.
+
+The release installer also guarantees that this supervisor is running. During
+an upgrade it stops the old-version supervisor before replacing the install
+tree, starts the newly installed executable, and verifies `running: true` before
+reporting success. Persistent configuration and credentials therefore resume
+automatically after uninstall/reinstall; a first-time unpaired installation
+runs in its waiting state.
 
 ```bash
 rearguard service status
@@ -468,19 +476,18 @@ CLI writes the device ID and its random credential to
 `$XDG_CONFIG_HOME/rearguard/device.json` (or
 `~/.config/rearguard/device.json`) with mode `0600`. The database stores only a
 SHA-256 digest of that credential. `--name <device-name>` overrides the Linux
-hostname. Immediately after approval, `connect` performs two distinct discovery
-phases. A short parallel sweep across ROS domain IDs 0 through 232 locates
-candidate domains but does not supply the final graph inventory. Each candidate
-is then scanned again in isolation for at least five seconds; only that thorough
-single-context result is uploaded as the authoritative inventory used by setup.
-The quick and thorough snapshots are never combined. If the thorough scan cannot
-reproduce a candidate domain, setup fails instead of presenting the quick scan's
-partial graph.
+hostname. Immediately after approval, `connect` searches ROS domain IDs 0
+through 232 in ascending batches. Every locator gets at least five seconds for
+asynchronous DDS discovery. Candidates are confirmed one at a time in numeric
+order; the first domain reproduced by the isolated confirmation becomes the
+authoritative setup inventory and the search stops immediately. `ROS_DOMAIN_ID`
+is not required and does not bias automatic discovery. Locator and confirmation
+snapshots are never combined.
 
 Pairing, credential storage, discovery progress, and cloud sync are displayed as
-one numbered interactive flow. `--scan-parallelism` (1..32) and
-`--scan-settle-ms` (0..10000) tune the locator sweep; a larger settle value also
-raises the thorough scan above its five-second minimum. `--json` emits
+one numbered interactive flow. `--scan-parallelism` (1..32) tunes each ordered
+batch. `--scan-settle-ms` may raise the discovery window above its five-second
+minimum. `--json` emits
 newline-delimited pairing and scan progress records. Setup advances and the
 background service starts only after the authoritative scan finds at least one
 active ROS 2 domain and captures one topic sample. If either is missing, start

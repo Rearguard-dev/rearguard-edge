@@ -750,7 +750,7 @@ void print_usage() {
                   "  rearguard hash --joints <j0,j1,j2> [--json]\n"
                   "  rearguard diff <a.mcap> <b.mcap> [--json]\n"
                   "  rearguard abi\n"
-                  "  rearguard connect [--name <device-name>] [--scan-settle-ms 750] "
+                  "  rearguard connect [--name <device-name>] [--scan-settle-ms 5000] "
                   "[--scan-parallelism 16] [--json]\n"
                   "  rearguard service <start|status|stop> [options]\n"
                   "  rearguard events [--after N] [--follow] [--json]\n"
@@ -806,7 +806,7 @@ int run_main(int argc, char** argv) {
 
     if (cmd == "connect") {
         harness::cli::ConnectOptions opts;
-        std::string scan_settle_ms = "750";
+        std::string scan_settle_ms = "5000";
         std::string scan_parallelism = "16";
         FlagParser flags;
         flags.add("--name", &opts.device_name);

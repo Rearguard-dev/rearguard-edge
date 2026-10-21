@@ -973,11 +973,15 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                 const std::size_t channels = mono ? 1 :
                     (frame.encoding == "rgba8" || frame.encoding == "bgra8" ? 4 : 3);
                 const bool supported = mono || bgr || frame.encoding == "rgb8" || frame.encoding == "rgba8";
+                constexpr std::uint32_t preview_width = 160;
+                constexpr std::uint32_t preview_height = 120;
                 if (supported && frame.width && frame.height &&
                     frame.step >= static_cast<std::size_t>(frame.width) * channels &&
                     frame.data.size() >= static_cast<std::size_t>(frame.step) * frame.height &&
-                    budget >= 320 * 240 * 6 + 1024) {
-                  const auto scale = std::max({1U, (frame.width + 319) / 320, (frame.height + 239) / 240});
+                    budget >= preview_width * preview_height * 6 + 1024) {
+                  const auto scale = std::max(
+                      {1U, (frame.width + preview_width - 1) / preview_width,
+                       (frame.height + preview_height - 1) / preview_height});
                   const auto width = (frame.width + scale - 1) / scale;
                   const auto height = (frame.height + scale - 1) / scale;
                   std::vector<std::uint8_t> rgb;
@@ -996,7 +1000,11 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                 const auto frame = decode<sensor_msgs::msg::CompressedImage>(*message);
                 sample["data"] = {{"format", frame.format},
                                   {"frame_id", frame.header.frame_id}};
-                if (frame.data.size() <= 2 * 1024 * 1024 &&
+                // Keep the database-backed setup inventory bounded. Larger
+                // compressed frames still prove that the topic is live, but
+                // omit the inline visual preview rather than duplicating
+                // multi-megabyte payloads through Postgres and Realtime.
+                if (frame.data.size() <= 256 * 1024 &&
                     budget >= frame.data.size() * 2 + 1024)
                   sample["compressed_image"] = {
                       {"format", frame.format},

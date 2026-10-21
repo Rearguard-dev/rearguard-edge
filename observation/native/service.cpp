@@ -118,6 +118,11 @@ std::optional<Ns> selected_domain(const Json &config) {
   return select_observation_domain(inventory);
 }
 
+bool paired_device(const Json &config) {
+  return config.contains("device_id") && config["device_id"].is_string() &&
+         !config["device_id"].get_ref<const std::string &>().empty();
+}
+
 void reap(pid_t &pid, const std::string &component) {
   if (pid <= 0) return;
   int status = 0;
@@ -182,8 +187,15 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
     record_event("observation_binding", "legacy_preset_cleared", "success");
   }
 
-  if (!fs::is_regular_file(service_root() / "setup-inventory.json"))
+  // The installer starts the supervisor even before first pairing. Stay idle
+  // in that state: starting a 0..232 scan would delay the stop/restart that
+  // connect performs immediately after credentials are created.
+  if (paired_device(config) &&
+      !fs::is_regular_file(service_root() / "setup-inventory.json"))
     scan_setup(config);
+  if (!paired_device(config))
+    write_status("waiting_for_pairing", config,
+                 {{"message", "Run rearguard connect to pair this device."}});
   Ns next_assignment = 0, next_scan = monotonic_ns() + 30000000000LL;
   fs::path active_session;
   std::string active_critic_id;
@@ -192,7 +204,8 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
     reap(sync_pid, "workflow_sync");
     reap(uploader_pid, "recording_uploader");
 
-    if ((!config.contains("robot_id") || config["robot_id"].is_null()) &&
+    if (paired_device(config) &&
+        (!config.contains("robot_id") || config["robot_id"].is_null()) &&
         monotonic_ns() >= next_assignment) {
       try {
         const auto credentials = load_device_credentials(
@@ -218,7 +231,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
     }
 
     auto domain = selected_domain(config);
-    if (!domain && monotonic_ns() >= next_scan) {
+    if (!domain && paired_device(config) && monotonic_ns() >= next_scan) {
       scan_setup(config);
       next_scan = monotonic_ns() + 30000000000LL;
       domain = selected_domain(config);
@@ -377,6 +390,14 @@ Json start(Json changes) {
   if (alive(read_pid())) return {{"status", "already_running"}, {"pid", read_pid()}};
   auto config = load_or_empty(config_path());
   config.update(changes);
+  // Reinstallation preserves pairing credentials even when service state was
+  // removed separately. Restore the device identity so automatic startup can
+  // resume assignment and discovery without requiring another pairing flow.
+  if (!paired_device(config)) {
+    const auto credentials = load_or_empty(default_credentials_path());
+    if (credentials.contains("device_id") && credentials["device_id"].is_string())
+      config["device_id"] = credentials["device_id"];
+  }
   config["schema_version"] = 1;
   atomic_json(config_path(), config);
   const pid_t pid = ::fork();
