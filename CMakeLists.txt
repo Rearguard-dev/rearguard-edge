@@ -15,8 +15,14 @@
 
 cmake_minimum_required(VERSION 3.22)
 
+# Release builds pass this from scripts/build_artifact.sh, whose argument comes
+# directly from the deployment tag.  Keep a default for ordinary local builds,
+# but never require a source edit just to publish a new version.
+set(HARNESS_VERSION "0.0.0" CACHE STRING
+    "Harness release version (overridden by tagged artifact builds)")
+
 project(harness_kernel
-        VERSION 0.4.13
+        VERSION "${HARNESS_VERSION}"
         DESCRIPTION "Physical AI harness kernel (v2 — schema-driven)"
         LANGUAGES CXX C)
 

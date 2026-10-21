@@ -21,14 +21,6 @@ cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: build_artifact.sh <version>}"
 WITH_ROS2="${HARNESS_WITH_ROS2:-OFF}"
-PROJECT_VERSION="$(awk '
-  /project\(harness_kernel/ { in_project = 1 }
-  in_project && /VERSION/ { print $2; exit }
-' CMakeLists.txt)"
-if [ "$VERSION" != "$PROJECT_VERSION" ]; then
-  echo "ERROR: requested artifact version $VERSION != CMake project version $PROJECT_VERSION" >&2
-  exit 1
-fi
 # Must match install.sh's TARGET computation exactly (see the comment there) —
 # any drift here is a manifest/tarball 404 on install.
 if [ -z "${TARGET:-}" ]; then
@@ -69,6 +61,7 @@ GEN=""; command -v ninja >/dev/null 2>&1 && GEN="-G Ninja"
 # shellcheck disable=SC2086
 cmake -S . -B "$BUILD" $GEN \
   -DCMAKE_BUILD_TYPE=Release \
+  -DHARNESS_VERSION="$VERSION" \
   -DHARNESS_WITH_ROS2="$WITH_ROS2" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
 cmake --build "$BUILD" --parallel
@@ -80,7 +73,8 @@ echo "== test"
 
 echo "== sanitizers"
 cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug \
-  -DHARNESS_WITH_ROS2="$WITH_ROS2" -DHARNESS_SANITIZE=ON > /dev/null
+  -DHARNESS_VERSION="$VERSION" -DHARNESS_WITH_ROS2="$WITH_ROS2" \
+  -DHARNESS_SANITIZE=ON > /dev/null
 cmake --build "$BUILD-san" --parallel > /dev/null
 (cd "$BUILD-san" && ASAN_OPTIONS=detect_leaks=0 ctest --output-on-failure)
 rm -rf "$BUILD-san"
@@ -95,6 +89,14 @@ if [ "$HDR_ABI" != "$LIB_ABI" ]; then
   exit 1
 fi
 echo "  ABI v$HDR_ABI"
+
+echo "== version check"
+BUILT_VERSION=$("$BUILD/rearguard" --version 2>/dev/null)
+if [ "$BUILT_VERSION" != "rearguard $VERSION" ]; then
+  echo "ERROR: built CLI reports '$BUILT_VERSION', expected 'rearguard $VERSION'" >&2
+  exit 1
+fi
+echo "  $BUILT_VERSION"
 
 echo "== package"
 cmake --install "$BUILD" > /dev/null

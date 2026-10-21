@@ -170,8 +170,9 @@ hk_submit_proposal  hk_report_budget  hk_last_error
 
 Three version numbers move independently, on purpose:
 
-- **Release version** — the library, static library and CLI all come from one
-  `project(VERSION)`, so they cannot diverge from each other.
+- **Release version** — tagged artifact builds pass the deployment version to
+  CMake as `HARNESS_VERSION`; the library, static library, CLI and package name
+  all derive from it, so publishing a new version requires no source edit.
 - **`HK_ABI_VERSION`** (and `HKC_ABI_VERSION` for critics) — bumped on any
   header change. A kernel patch release must not force you to recompile, so
   this is deliberately not tied to the release version. The release build fails
