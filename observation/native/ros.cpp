@@ -428,8 +428,8 @@ class Observer {
             "candidate detector is in its ten-second ROS cooldown");
     auto canonical_detection = detection;
     canonical_detection["before_s"] = 10.0;
-    canonical_detection["after_s"] = 0.0;
-    auto &w = evidence_.capture(10.0, 0.0, detection.at("evidence_class"));
+    canonical_detection["after_s"] = 5.0;
+    auto &w = evidence_.capture(10.0, 5.0, detection.at("evidence_class"));
     w.update({{"trigger", "critic_candidate"}, {"detection", canonical_detection}});
     detection_marks_[key] = *evidence_.now;
     return w;
@@ -934,12 +934,66 @@ Json discover_domain(Ns domain, Ns settle_ms) {
           [&, index, type](std::shared_ptr<rclcpp::SerializedMessage> message) {
             auto &sample = topics[index]["sample"];
             if (sample["status"] != "timeout") {
-              // Preserve a short numeric history for setup charts. The first
-              // message remains the canonical sample and the bounded series
-              // adds temporal evidence without turning discovery into the
-              // long-lived MCAP data plane.
-              if (sample["status"] == "captured" && sample.contains("series") &&
-                  sample["series"].size() < 64) {
+              // Preserve a short, bounded history for synchronized setup
+              // previews. The first message remains the canonical sample;
+              // these frames and numeric values are only the real messages
+              // observed during the same 15 second discovery window.
+              if (sample["status"] == "captured" &&
+                  (type == "sensor_msgs/msg/Image" ||
+                   type == "sensor_msgs/msg/CompressedImage") &&
+                  sample.contains("frames") && sample["frames"].size() < 23) {
+                try {
+                  Json frame_entry{{"captured_wall_ns", wall_ns()}};
+                  if (type == "sensor_msgs/msg/Image") {
+                    const auto frame = decode<sensor_msgs::msg::Image>(*message);
+                    const bool mono = frame.encoding == "mono8";
+                    const bool bgr = frame.encoding == "bgr8" || frame.encoding == "bgra8";
+                    const std::size_t channels = mono ? 1 :
+                        (frame.encoding == "rgba8" || frame.encoding == "bgra8" ? 4 : 3);
+                    const bool supported = mono || bgr || frame.encoding == "rgb8" ||
+                                           frame.encoding == "rgba8";
+                    constexpr std::uint32_t preview_width = 160;
+                    constexpr std::uint32_t preview_height = 120;
+                    if (supported && frame.width && frame.height &&
+                        frame.step >= static_cast<std::size_t>(frame.width) * channels &&
+                        frame.data.size() >= static_cast<std::size_t>(frame.step) * frame.height) {
+                      const auto scale = std::max(
+                          {1U, (frame.width + preview_width - 1) / preview_width,
+                           (frame.height + preview_height - 1) / preview_height});
+                      const auto width = (frame.width + scale - 1) / scale;
+                      const auto height = (frame.height + scale - 1) / scale;
+                      std::vector<std::uint8_t> rgb;
+                      rgb.reserve(width * height * 3);
+                      for (std::uint32_t y = 0; y < height; ++y)
+                        for (std::uint32_t x = 0; x < width; ++x) {
+                          const auto offset = static_cast<std::size_t>(y * scale) * frame.step +
+                                              x * scale * channels;
+                          rgb.push_back(frame.data[offset + (mono ? 0 : bgr ? 2 : 0)]);
+                          rgb.push_back(frame.data[offset + (mono ? 0 : 1)]);
+                          rgb.push_back(frame.data[offset + (mono ? 0 : bgr ? 0 : 2)]);
+                        }
+                      frame_entry["image"] = {{"width", width}, {"height", height},
+                                                {"rgb_hex", hex(rgb.data(), rgb.size())}};
+                    }
+                  } else {
+                    const auto frame = decode<sensor_msgs::msg::CompressedImage>(*message);
+                    if (frame.data.size() <= 128 * 1024)
+                      frame_entry["compressed_image"] = {
+                          {"format", frame.format},
+                          {"data_hex", hex(frame.data.data(), frame.data.size())}};
+                  }
+                  if (frame_entry.size() > 1) {
+                    const auto size = frame_entry.dump().size();
+                    if (size <= camera_sample_budget) {
+                      sample["frames"].push_back(std::move(frame_entry));
+                      camera_sample_budget -= size;
+                    }
+                  }
+                } catch (const std::exception &error) {
+                  sample["frames_error"] = error.what();
+                }
+              } else if (sample["status"] == "captured" && sample.contains("series") &&
+                         sample["series"].size() < 64) {
                 try {
                   if (type == "sensor_msgs/msg/JointState") {
                     const auto state = decode<sensor_msgs::msg::JointState>(*message);
@@ -1001,6 +1055,7 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                     }
                   sample["image"] = {{"width", width}, {"height", height},
                                      {"rgb_hex", hex(rgb.data(), rgb.size())}};
+                  sample["frames"] = Json::array();
                 }
               } else if (type == "sensor_msgs/msg/CompressedImage") {
                 const auto frame = decode<sensor_msgs::msg::CompressedImage>(*message);
@@ -1011,10 +1066,12 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                 // omit the inline visual preview rather than duplicating
                 // multi-megabyte payloads through Postgres and Realtime.
                 if (frame.data.size() <= 256 * 1024 &&
-                    budget >= frame.data.size() * 2 + 1024)
+                    budget >= frame.data.size() * 2 + 1024) {
                   sample["compressed_image"] = {
                       {"format", frame.format},
                       {"data_hex", hex(frame.data.data(), frame.data.size())}};
+                  sample["frames"] = Json::array();
+                }
               } else if (type == "sensor_msgs/msg/JointState") {
                 const auto state = decode<sensor_msgs::msg::JointState>(*message);
                 sample["data"] = {{"name", state.name},
@@ -1058,11 +1115,17 @@ Json discover_domain(Ns domain, Ns settle_ms) {
       topic["sample"] = {{"status", "unavailable"}, {"error", message}};
     }
   }
-  const auto sample_deadline = monotonic_ns() + 1500000000LL;
+  // All setup modalities share this one wall-clock capture interval. Each
+  // sample/frame carries a timestamp from the same clock so camera and numeric
+  // previews can use one synchronized cursor.
+  constexpr Ns setup_sample_duration_ns = 15000000000LL;
+  const auto sample_start_wall_ns = wall_ns();
+  const auto sample_deadline = monotonic_ns() + setup_sample_duration_ns;
   while (!sample_subscriptions.empty() && rclcpp::ok(context.value) &&
          monotonic_ns() < sample_deadline) {
     executor.spin_once(std::chrono::milliseconds(25));
   }
+  const auto sample_end_wall_ns = wall_ns();
   sample_subscriptions.clear();
 
   Json services = Json::array();
@@ -1138,6 +1201,10 @@ Json discover_domain(Ns domain, Ns settle_ms) {
       {"schema", "rearguard.ros_setup_inventory"},
       {"schema_version", 1},
       {"captured_wall_ns", wall_ns()},
+      {"sample_window", {{"clock", "system_wall_ns"},
+                           {"start_ns", sample_start_wall_ns},
+                           {"end_ns", sample_end_wall_ns},
+                           {"duration_ns", sample_end_wall_ns - sample_start_wall_ns}}},
       {"domain_id", domain},
       {"settle_ms", settle_ms},
       {"ros", {{"distro", env("ROS_DISTRO")},

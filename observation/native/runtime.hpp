@@ -6,14 +6,14 @@
 namespace harness::observation {
 struct Detection {
   std::string detector_id, evidence_class;
-  double confidence = 0, before_s = 10, after_s = 0;
+  double confidence = 0, before_s = 10, after_s = 5;
   std::string source = "trained_critic";
   std::string deployment_id;
   bool deployment_validated = false;
   std::string proposition_id;
   Detection() = default;
   Detection(std::string detector, std::string evidence, double score,
-            double before = 5, double after = 2,
+            double before = 10, double after = 5,
             std::string detection_source = "trained_critic",
             std::string deployment = {}, bool validated = false)
       : detector_id(std::move(detector)), evidence_class(std::move(evidence)),

@@ -214,6 +214,7 @@ Json progress_payload(const Json& batch) {
             auto& sample = topic["sample"];
             sample.erase("image");
             sample.erase("compressed_image");
+            sample.erase("frames");
             sample.erase("cdr_hex");
             sample.erase("series");
         }

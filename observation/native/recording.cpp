@@ -5,7 +5,9 @@
 #include <sstream>
 namespace harness::observation {
 namespace {
-constexpr Ns kRetentionNs = 10000000000LL;
+// Keep enough closed pre-roll segments for a T-10s..T+5s incident window to
+// finish before export. The exported MCAP is still clipped to exactly 15s.
+constexpr Ns kRetentionNs = 30000000000LL;
 constexpr Ns kSegmentDurationNs = 2000000000LL;
 constexpr std::size_t kSegmentByteTarget = 32U * 1024U * 1024U;
 

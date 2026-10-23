@@ -704,6 +704,12 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
                 window.contains("start_ns") && window.contains("mark_ns") &&
                 window.contains("end_ns"),
             "edge observer returned an invalid incident window");
+    const auto start_ns = window.at("start_ns").get<Ns>();
+    const auto mark_ns = window.at("mark_ns").get<Ns>();
+    const auto end_ns = window.at("end_ns").get<Ns>();
+    require(mark_ns - start_ns == 10000000000LL &&
+                end_ns - mark_ns == 5000000000LL,
+            "incident window must span exactly T-10s through T+5s");
     if (!s.contains("incident_requests"))
       s["incident_requests"] = Json::object();
     const auto id = required_text(window.at("id"), "window id");

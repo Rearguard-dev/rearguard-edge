@@ -305,7 +305,7 @@ Json run_workflow_sync(const Options &options, bool once) {
          {"request_id", capture_request_id},
          {"operation", "capture"},
          {"before", 10.0},
-         {"after", 0.0},
+         {"after", 5.0},
          {"label", required_text(payload.at("label"), "label")}},
         meta);
   };

@@ -452,21 +452,22 @@ void workflow_tests() {
          {"expected_revision", 0},
          {"operation", "report_incident"},
          {"payload", {{"label", "operator report"}, {"before_s", 10},
-                      {"after_s", 3}}}});
+                      {"after_s", 5}}}});
     int capture_calls = 0;
     WorkflowConnector connector(
         incident.store, "00000000-0000-4000-8000-000000000102", transport,
         [&](const Json &) {
           ++capture_calls;
           return Json{{"id", "w-web-report"}, {"epoch", 2},
-                      {"start_ns", 100}, {"mark_ns", 200}, {"end_ns", 300},
+                      {"start_ns", 100}, {"mark_ns", 10000000100LL},
+                      {"end_ns", 15000000100LL},
                       {"label", "operator report"}, {"status", "collecting"},
                       {"trigger", "operator_mark"}};
         });
     connector.cycle();
     const auto profile = incident.store.snapshot();
     check(capture_calls == 1 && profile["revision"] == 1 &&
-              profile["incident_requests"]["w-web-report"]["window"]["mark_ns"] == 200 &&
+              profile["incident_requests"]["w-web-report"]["window"]["mark_ns"] == 10000000100LL &&
               transport.uploads.back()["receipts"][0]["status"] == "applied",
           "web incident command is timestamped by the observer and durably mirrored");
     transport.commands.push_back(
@@ -475,10 +476,39 @@ void workflow_tests() {
          {"actor", "web-user"}, {"expected_revision", 0},
          {"operation", "report_incident"},
          {"payload", {{"label", "operator report"}, {"before_s", 10},
-                      {"after_s", 3}}}});
+                      {"after_s", 5}}}});
     connector.cycle();
     check(capture_calls == 1 && incident.store.snapshot()["revision"] == 1,
           "incident command retry replays its receipt without marking a second window");
+  }
+  {
+    Fixture invalid_window;
+    FakeWorkflowTransport transport;
+    transport.commands.push_back(
+        {{"schema_version", 1},
+         {"request_id", "00000000-0000-4000-8000-000000000011"},
+         {"actor", "web-user"},
+         {"expected_revision", 0},
+         {"operation", "report_incident"},
+         {"payload", {{"label", "operator report"}, {"before_s", 10},
+                      {"after_s", 5}}}});
+    WorkflowConnector connector(
+        invalid_window.store, "00000000-0000-4000-8000-000000000103",
+        transport, [&](const Json &) {
+          return Json{{"id", "w-invalid-window"}, {"epoch", 2},
+                      {"start_ns", 100}, {"mark_ns", 10000000100LL},
+                      {"end_ns", 10000000100LL},
+                      {"label", "operator report"}, {"status", "ready"},
+                      {"trigger", "operator_mark"}};
+        });
+    connector.cycle();
+    const auto profile = invalid_window.store.snapshot();
+    const auto receipt = transport.uploads.back()["receipts"][0];
+    check(profile["revision"] == 0 && profile["incident_requests"].empty() &&
+              receipt["status"] == "rejected" &&
+              receipt["error"].get<std::string>().find("T-10s") !=
+                  std::string::npos,
+          "edge rejects incident evidence outside the T-10s through T+5s contract");
   }
   Fixture f;
   {

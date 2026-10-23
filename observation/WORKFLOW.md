@@ -136,9 +136,12 @@ wall seconds. If the clock stops during collection, the window becomes
 The authenticated web flow can now initiate the same capture with a
 revision-bound `report_incident` command. The workflow connector resolves the
 currently active observer session and publishes the capture request locally;
-the browser never supplies the ROS timestamps. The default UI window retains a
-synchronized 10-second history window ending at the edge mark. Its snapshot progresses
-through `incident_requests.<window-id>` from `collecting` to
+the browser never supplies the ROS timestamps. The standard window spans
+exactly fifteen seconds: ten seconds before the
+edge-authored incident mark and five seconds after it. Camera, joint-state,
+command, and controller messages are clipped from the same ROS-time interval
+and retain their original timestamps. Its snapshot progresses through
+`incident_requests.<window-id>` from `collecting` to
 `preparing_evidence` and `ready`, at which point the linked candidate can be
 reviewed. The evidence snapshot is shown before classification, description,
 proposition attachment, or recovery guidance. An operator report is only a

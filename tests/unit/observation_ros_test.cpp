@@ -95,20 +95,23 @@ void recording_test(const fs::path &root) {
   joint.name = config["joint_order"].get<std::vector<std::string>>();
   joint.position.assign(joint.name.size(), 0.0);
   for (const Ns time : {0LL, 3000000000LL, 6000000000LL, 9000000000LL,
-                        12000000000LL, 15000000000LL})
+                        12000000000LL, 15000000000LL, 18000000000LL,
+                        21000000000LL, 24000000000LL, 27000000000LL,
+                        30000000000LL, 33000000000LL, 36000000000LL})
     bounded.write(joint_topic["name"].get<std::string>(),
                   joint_topic["type"].get<std::string>(), serialize(joint),
                   time, 1);
   bounded.close();
   const auto retained = read_json(retention_root / "recording.json");
   require(retained.at("mode") == "incident_pre_roll" &&
-              retained.at("retention_ns") == 10000000000LL,
+              retained.at("retention_ns") == 30000000000LL,
           "recording did not declare bounded incident pre-roll");
   for (const auto &segment : retained.at("segments"))
-    require(segment.at("end_ns").get<Ns>() >= 5000000000LL,
-            "recording retained data older than the ten-second pre-roll");
-  require(!fs::exists(retention_root / "rosbag2/segment-000000"),
-          "expired pre-roll segment was not reclaimed");
+    require(segment.at("end_ns").get<Ns>() >= 6000000000LL,
+            "recording retained data outside its thirty-second buffer");
+  require(!fs::exists(retention_root / "rosbag2/segment-000000") &&
+              fs::exists(retention_root / "rosbag2/segment-000006"),
+          "retention must reclaim old data while preserving T-10s through T+5s");
 
   const Json window = {{"id", "ros-compiled-window"},
                        {"status", "ready"}, {"epoch", 1},
@@ -256,6 +259,13 @@ void setup_snapshot_test() {
   require(frame["image"]["rgb_hex"] == "ff000000ff00", "BGR camera preview is incorrect");
   require(frame["image"]["width"] == 2 && frame["image"]["height"] == 1,
           "camera snapshot dimensions changed");
+  require(frame.contains("frames") && !frame["frames"].empty(),
+          "camera discovery clip did not retain subsequent real frames");
+  require(frame["frames"].front()["captured_wall_ns"].get<Ns>() >=
+              frame["captured_wall_ns"].get<Ns>(),
+          "camera discovery clip timestamps are not monotonic");
+  require(frame["frames"].size() <= 23,
+          "camera discovery clip exceeded its bounded frame count");
   const auto &encoded = find("/setup_test/camera/compressed");
   require(encoded["compressed_image"]["format"] == "jpeg" &&
               encoded["compressed_image"]["data_hex"] == "ffd8ffd9",

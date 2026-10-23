@@ -154,15 +154,17 @@ messages, clock and audit events). `recording.json` indexes the currently
 retained chunks by clock epoch and timestamp. New runs default to MCAP
 (`--storage sqlite3` remains available); ROS needs its MCAP storage plugin for
 MCAP recording/export. The observer rotates at two seconds or 32 MiB and
-retains only the latest ten seconds. A detected or operator-reported incident
-is exported as an exact content-addressed window. Only this incident artifact,
+retains the latest thirty seconds so a five-second post-roll cannot evict the
+required pre-roll. A detected or operator-reported incident is exported as an
+exact fifteen-second content-addressed window from ten seconds before the mark
+through five seconds after it. Only this incident artifact,
 not the rolling pre-roll, uses the asynchronous verified R2 flow in
 [`docs/r2-recording-pipeline.md`](../../docs/r2-recording-pipeline.md).
 `cloud-recordings.json` is a durable per-incident operation journal containing
 attempt counts, local/object paths, grant expiry, state, and the last error.
 Upload stalls cannot block observation, workflow sync, service status
 maintenance, or pre-roll eviction. Inactive pre-roll is removed after all
-incident windows have been exported. Exact ten-second incident artifacts are
+incident windows have been exported. Exact fifteen-second incident artifacts are
 the only durable edge recordings and remain available to the workflow for
 review, critic compilation, or recovery authoring.
 The uploader continues draining while capture is paused, and the observer

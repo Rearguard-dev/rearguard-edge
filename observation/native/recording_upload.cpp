@@ -203,7 +203,7 @@ Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
   atomic_json(session / "recording.json",
               {{"schema_version", 2},
                {"mode", "incident_pre_roll"},
-               {"retention_ns", recording.value("retention_ns", 10000000000LL)},
+               {"retention_ns", recording.value("retention_ns", 30000000000LL)},
                {"segments", Json::array()},
                {"retired_wall_ns", wall_ns()},
                {"reclaimed_bytes", reclaimed}});
