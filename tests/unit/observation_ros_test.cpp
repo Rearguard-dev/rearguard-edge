@@ -218,6 +218,8 @@ void setup_snapshot_test() {
       "/setup_test/camera", rclcpp::SensorDataQoS());
   auto compressed = node->create_publisher<sensor_msgs::msg::CompressedImage>(
       "/setup_test/camera/compressed", rclcpp::SensorDataQoS());
+  auto joints = node->create_publisher<sensor_msgs::msg::JointState>(
+      "/setup_test/joint_states", rclcpp::SensorDataQoS());
   auto silent = node->create_publisher<std_msgs::msg::String>("/setup_test/silent", 1);
   auto text = node->create_publisher<std_msgs::msg::String>("/setup_test/text", 1);
   std::vector<std::string> args = {"setup", "--domain-min", "98", "--domain-max", "98",
@@ -239,6 +241,10 @@ void setup_snapshot_test() {
     encoded.format = "jpeg";
     encoded.data = {0xff, 0xd8, 0xff, 0xd9};
     compressed->publish(encoded);
+    sensor_msgs::msg::JointState state;
+    state.name = {"joint"};
+    state.position = {1.0};
+    joints->publish(state);
     if (text->get_subscription_count()) {
       std_msgs::msg::String value;
       value.data = sent_first ? "later" : "first";
@@ -255,21 +261,26 @@ void setup_snapshot_test() {
     throw std::runtime_error("missing setup topic: " + name);
   };
   const auto &frame = find("/setup_test/camera");
-  require(frame["status"] == "captured", "camera snapshot not captured");
-  require(frame["image"]["rgb_hex"] == "ff000000ff00", "BGR camera preview is incorrect");
-  require(frame["image"]["width"] == 2 && frame["image"]["height"] == 1,
-          "camera snapshot dimensions changed");
-  require(frame.contains("frames") && !frame["frames"].empty(),
-          "camera discovery clip did not retain subsequent real frames");
-  require(frame["frames"].front()["captured_wall_ns"].get<Ns>() >=
-              frame["captured_wall_ns"].get<Ns>(),
-          "camera discovery clip timestamps are not monotonic");
-  require(frame["frames"].size() <= 23,
-          "camera discovery clip exceeded its bounded frame count");
+  require(frame["status"] == "unavailable",
+          "raw camera transport must not be fetched during setup");
   const auto &encoded = find("/setup_test/camera/compressed");
   require(encoded["compressed_image"]["format"] == "jpeg" &&
               encoded["compressed_image"]["data_hex"] == "ffd8ffd9",
           "compressed camera snapshot is incorrect");
+  require(encoded.contains("frames") && !encoded["frames"].empty(),
+          "compressed camera discovery clip did not retain later frames");
+  require(encoded["frames"].front()["captured_wall_ns"].get<Ns>() -
+              encoded["captured_wall_ns"].get<Ns>() >= 625000000LL,
+          "camera discovery frames were not distributed over the time window");
+  require(encoded["frames"].size() <= 23,
+          "camera discovery clip exceeded its bounded frame count");
+  const auto &states = find("/setup_test/joint_states");
+  require(states["series"].size() <= 64,
+          "joint discovery series exceeded its bounded sample count");
+  require(states["series"].back()["captured_wall_ns"].get<Ns>() -
+              states["series"].front()["captured_wall_ns"].get<Ns>() >=
+              14000000000LL,
+          "joint discovery samples were not distributed over the time window");
   require(find("/setup_test/silent")["status"] == "timeout", "silent topic must time out");
   require(find("/setup_test/text")["data"] == "first", "setup sample was overwritten");
   for (const auto &entry : domain["nodes"])

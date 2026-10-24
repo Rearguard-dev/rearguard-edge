@@ -118,7 +118,7 @@
           }
         },
         "discovery": {
-          "opening": "Explain that setup is waiting for a live ROS 2 graph and one captured topic sample. Ask the user to start their robot software or simulation, then tell you when it is running.",
+          "opening": "Explain that setup is scanning for a live ROS 2 graph and one captured topic sample, and that the initial scan usually takes 3–4 minutes. Ask the user to start their robot software or simulation, then tell you when it is running.",
           "opening_artifacts": [],
           "actions": {
             "check_discovery": { "description": "Check whether ROS 2 discovery captured a usable sample.", "suggested_reply": "The robot is running", "handler": "check_setup_discovery", "artifacts": ["ros2_setup_discovery"] },

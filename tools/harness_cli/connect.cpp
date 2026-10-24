@@ -86,7 +86,8 @@ struct HttpResult {
 };
 
 HttpResult post_rpc(const std::string& api_url, const std::string& anon_key,
-                    const std::string& function, const Json& payload) {
+                    const std::string& function, const Json& payload,
+                    long timeout_seconds = 20L) {
     HttpResult result;
     CURL* curl = curl_easy_init();
     if (curl == nullptr) {
@@ -112,7 +113,7 @@ HttpResult post_rpc(const std::string& api_url, const std::string& anon_key,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result.body);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "rearguard-cli/0.3");
 
     const CURLcode code = curl_easy_perform(curl);
@@ -179,14 +180,19 @@ bool report_scan_event(const std::string& api_url, const std::string& anon_key,
     HttpResult result;
     constexpr int kAttempts = 4;
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
-        result = post_rpc(api_url, anon_key, "report_device_setup_scan", request);
+        // A completed setup event includes the bounded camera clips and can be
+        // several MiB. Keep pairing RPCs short, but allow upload time plus the
+        // database function's 30-second statement window for scan ingestion.
+        result = post_rpc(api_url, anon_key, "report_device_setup_scan", request, 60L);
         if (result.status >= 200 && result.status < 300) return true;
         if (attempt + 1 == kAttempts || !retryable_report_failure(result)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(250 * (1 << attempt)));
     }
     if (emit_error) {
-        std::fprintf(stderr, "error: could not stream setup scan event: %s\n",
-                     response_message(result).c_str());
+        const auto request_bytes = request.dump().size();
+        std::fprintf(stderr,
+                     "error: could not stream setup scan event (%zu bytes): %s\n",
+                     request_bytes, response_message(result).c_str());
     }
     return false;
 }

@@ -30,7 +30,7 @@ int domain_score(const Json &domain) {
   int joints = 0, cameras = 0, sampled = 0;
   for (const auto &topic : domain.value("topics", Json::array())) {
     if (has_type(topic, "sensor_msgs/msg/JointState") && captured(topic)) ++joints;
-    if (has_type(topic, "sensor_msgs/msg/Image") && captured(topic)) ++cameras;
+    if (has_type(topic, "sensor_msgs/msg/CompressedImage") && captured(topic)) ++cameras;
     if (captured(topic)) ++sampled;
   }
   if (joints != 1 || cameras == 0) return -1;
@@ -69,7 +69,7 @@ Json compile_observation_binding(const Json &inventory, Ns domain_id,
               "setup discovered multiple sampled JointState topics; operator selection is required");
       joint_topic = topic;
     }
-    if (has_type(topic, "sensor_msgs/msg/Image") && captured(topic))
+    if (has_type(topic, "sensor_msgs/msg/CompressedImage") && captured(topic))
       cameras.push_back(topic);
     if (has_type(topic, "std_msgs/msg/Float64MultiArray") ||
         has_type(topic, "trajectory_msgs/msg/JointTrajectory"))
@@ -79,7 +79,7 @@ Json compile_observation_binding(const Json &inventory, Ns domain_id,
   }
   require(!joint_topic.is_null(),
           "setup did not capture one usable JointState topic");
-  require(!cameras.empty(), "setup did not capture a raw Image topic");
+  require(!cameras.empty(), "setup did not capture a compressed camera topic");
   const auto sample = joint_topic.at("sample");
   const auto data = sample.value("data", Json::object());
   const auto joints = data.value("name", Json::array());
@@ -113,7 +113,7 @@ Json compile_observation_binding(const Json &inventory, Ns domain_id,
   }
   for (const auto &camera : cameras)
     topics.push_back({{"name", camera.at("name")},
-                      {"type", "sensor_msgs/msg/Image"},
+                      {"type", "sensor_msgs/msg/CompressedImage"},
                       {"role", "camera"}, {"required", true}});
 
   return {{"schema_version", 1},

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
@@ -908,6 +909,12 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   std::vector<rclcpp::GenericSubscription::SharedPtr> sample_subscriptions;
   std::size_t sample_budget = 2 * 1024 * 1024;
   std::size_t camera_sample_budget = 16 * 1024 * 1024;
+  std::vector<Ns> last_camera_capture_ns(topics.size(), 0);
+  std::vector<Ns> last_series_capture_ns(topics.size(), 0);
+  // Twenty-four source-quality frames distributed over the whole 15-second
+  // window. This is deliberately independent of the camera publisher rate.
+  constexpr Ns camera_preview_interval_ns = 625000000LL;
+  constexpr Ns numeric_preview_interval_ns = 234375000LL;
   const auto hex = [](const std::uint8_t *bytes, std::size_t length) {
     constexpr char digits[] = "0123456789abcdef";
     std::string result;
@@ -927,6 +934,24 @@ Json discover_domain(Ns domain, Ns settle_ms) {
       continue;
     }
     const auto type = topic["types"][0].get<std::string>();
+    const auto topic_name = topic["name"].get<std::string>();
+    std::string lower_topic_name = topic_name;
+    std::transform(lower_topic_name.begin(), lower_topic_name.end(),
+                   lower_topic_name.begin(), [](unsigned char value) {
+                     return static_cast<char>(std::tolower(value));
+                   });
+    // image_transport advertises raw, compressed, and compressedDepth
+    // endpoints. Subscribing to compressedDepth for an RGB stream makes the
+    // publisher log an error on every frame. Setup previews consume only the
+    // source-quality CompressedImage stream and never subscribe to the other
+    // camera transports.
+    if (type == "sensor_msgs/msg/Image" ||
+        (type == "sensor_msgs/msg/CompressedImage" &&
+         lower_topic_name.find("/compresseddepth") != std::string::npos)) {
+      topic["sample"] = {{"status", "unavailable"},
+                         {"error", "Ignored: setup camera capture uses the compressed image transport."}};
+      continue;
+    }
     try {
       sample_subscriptions.push_back(node->create_generic_subscription(
           topic["name"].get<std::string>(), type,
@@ -939,54 +964,25 @@ Json discover_domain(Ns domain, Ns settle_ms) {
               // these frames and numeric values are only the real messages
               // observed during the same 15 second discovery window.
               if (sample["status"] == "captured" &&
-                  (type == "sensor_msgs/msg/Image" ||
-                   type == "sensor_msgs/msg/CompressedImage") &&
+                  type == "sensor_msgs/msg/CompressedImage" &&
                   sample.contains("frames") && sample["frames"].size() < 23) {
                 try {
-                  Json frame_entry{{"captured_wall_ns", wall_ns()}};
-                  if (type == "sensor_msgs/msg/Image") {
-                    const auto frame = decode<sensor_msgs::msg::Image>(*message);
-                    const bool mono = frame.encoding == "mono8";
-                    const bool bgr = frame.encoding == "bgr8" || frame.encoding == "bgra8";
-                    const std::size_t channels = mono ? 1 :
-                        (frame.encoding == "rgba8" || frame.encoding == "bgra8" ? 4 : 3);
-                    const bool supported = mono || bgr || frame.encoding == "rgb8" ||
-                                           frame.encoding == "rgba8";
-                    constexpr std::uint32_t preview_width = 160;
-                    constexpr std::uint32_t preview_height = 120;
-                    if (supported && frame.width && frame.height &&
-                        frame.step >= static_cast<std::size_t>(frame.width) * channels &&
-                        frame.data.size() >= static_cast<std::size_t>(frame.step) * frame.height) {
-                      const auto scale = std::max(
-                          {1U, (frame.width + preview_width - 1) / preview_width,
-                           (frame.height + preview_height - 1) / preview_height});
-                      const auto width = (frame.width + scale - 1) / scale;
-                      const auto height = (frame.height + scale - 1) / scale;
-                      std::vector<std::uint8_t> rgb;
-                      rgb.reserve(width * height * 3);
-                      for (std::uint32_t y = 0; y < height; ++y)
-                        for (std::uint32_t x = 0; x < width; ++x) {
-                          const auto offset = static_cast<std::size_t>(y * scale) * frame.step +
-                                              x * scale * channels;
-                          rgb.push_back(frame.data[offset + (mono ? 0 : bgr ? 2 : 0)]);
-                          rgb.push_back(frame.data[offset + (mono ? 0 : 1)]);
-                          rgb.push_back(frame.data[offset + (mono ? 0 : bgr ? 0 : 2)]);
-                        }
-                      frame_entry["image"] = {{"width", width}, {"height", height},
-                                                {"rgb_hex", hex(rgb.data(), rgb.size())}};
-                    }
-                  } else {
-                    const auto frame = decode<sensor_msgs::msg::CompressedImage>(*message);
-                    if (frame.data.size() <= 128 * 1024)
-                      frame_entry["compressed_image"] = {
-                          {"format", frame.format},
-                          {"data_hex", hex(frame.data.data(), frame.data.size())}};
-                  }
+                  const auto captured_wall_ns = wall_ns();
+                  if (captured_wall_ns - last_camera_capture_ns[index] <
+                      camera_preview_interval_ns)
+                    return;
+                  const auto frame = decode<sensor_msgs::msg::CompressedImage>(*message);
+                  Json frame_entry{{"captured_wall_ns", captured_wall_ns}};
+                  if (frame.data.size() <= 256 * 1024)
+                    frame_entry["compressed_image"] = {
+                        {"format", frame.format},
+                        {"data_hex", hex(frame.data.data(), frame.data.size())}};
                   if (frame_entry.size() > 1) {
                     const auto size = frame_entry.dump().size();
                     if (size <= camera_sample_budget) {
                       sample["frames"].push_back(std::move(frame_entry));
                       camera_sample_budget -= size;
+                      last_camera_capture_ns[index] = captured_wall_ns;
                     }
                   }
                 } catch (const std::exception &error) {
@@ -995,15 +991,21 @@ Json discover_domain(Ns domain, Ns settle_ms) {
               } else if (sample["status"] == "captured" && sample.contains("series") &&
                          sample["series"].size() < 64) {
                 try {
+                  const auto captured_wall_ns = wall_ns();
+                  if (captured_wall_ns - last_series_capture_ns[index] <
+                      numeric_preview_interval_ns)
+                    return;
                   if (type == "sensor_msgs/msg/JointState") {
                     const auto state = decode<sensor_msgs::msg::JointState>(*message);
-                    sample["series"].push_back({{"captured_wall_ns", wall_ns()},
+                    sample["series"].push_back({{"captured_wall_ns", captured_wall_ns},
                                                  {"name", state.name},
                                                  {"value", json_numbers(state.position)}});
+                    last_series_capture_ns[index] = captured_wall_ns;
                   } else if (type == "std_msgs/msg/Float64MultiArray") {
                     const auto values = decode<std_msgs::msg::Float64MultiArray>(*message);
-                    sample["series"].push_back({{"captured_wall_ns", wall_ns()},
+                    sample["series"].push_back({{"captured_wall_ns", captured_wall_ns},
                                                  {"value", json_numbers(values.data)}});
+                    last_series_capture_ns[index] = captured_wall_ns;
                   }
                 } catch (const std::exception &error) {
                   sample["series_error"] = error.what();
@@ -1012,8 +1014,7 @@ Json discover_domain(Ns domain, Ns settle_ms) {
               return;
             }
             const auto &bytes = message->get_rcl_serialized_message();
-            auto &budget = type == "sensor_msgs/msg/Image" ||
-                                   type == "sensor_msgs/msg/CompressedImage"
+            auto &budget = type == "sensor_msgs/msg/CompressedImage"
                                ? camera_sample_budget
                                : sample_budget;
             if (budget < 1024 || bytes.buffer_length > 32 * 1024 * 1024) {
@@ -1071,6 +1072,7 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                       {"format", frame.format},
                       {"data_hex", hex(frame.data.data(), frame.data.size())}};
                   sample["frames"] = Json::array();
+                  last_camera_capture_ns[index] = sample["captured_wall_ns"].get<Ns>();
                 }
               } else if (type == "sensor_msgs/msg/JointState") {
                 const auto state = decode<sensor_msgs::msg::JointState>(*message);
@@ -1082,12 +1084,14 @@ Json discover_domain(Ns domain, Ns settle_ms) {
                 sample["series"].push_back({{"captured_wall_ns", sample["captured_wall_ns"]},
                                               {"name", state.name},
                                               {"value", json_numbers(state.position)}});
+                last_series_capture_ns[index] = sample["captured_wall_ns"].get<Ns>();
               } else if (type == "std_msgs/msg/Float64MultiArray") {
                 const auto values = decode<std_msgs::msg::Float64MultiArray>(*message);
                 sample["data"] = {{"value", json_numbers(values.data)}};
                 sample["series"] = Json::array();
                 sample["series"].push_back({{"captured_wall_ns", sample["captured_wall_ns"]},
                                               {"value", json_numbers(values.data)}});
+                last_series_capture_ns[index] = sample["captured_wall_ns"].get<Ns>();
               } else if (type == "std_msgs/msg/String") {
                 const auto value = decode<String>(*message).data;
                 sample["data"] = value.substr(0, 4096);
@@ -1096,7 +1100,7 @@ Json discover_domain(Ns domain, Ns settle_ms) {
             } catch (const std::exception &error) {
               sample["error"] = error.what();
             }
-            if (!sample.contains("data") || type == "sensor_msgs/msg/Image") {
+            if (!sample.contains("data")) {
               const auto length = std::min<std::size_t>(bytes.buffer_length, 4096);
               sample["cdr_hex"] = hex(bytes.buffer, length);
               sample["truncated"] = length < bytes.buffer_length;

@@ -232,7 +232,9 @@ Json load_config(const fs::path &path) {
                 (role == "action" &&
                  (type == "std_msgs/msg/Float64MultiArray" ||
                   type == "trajectory_msgs/msg/JointTrajectory")) ||
-                (role == "camera" && type == "sensor_msgs/msg/Image"),
+                (role == "camera" &&
+                 (type == "sensor_msgs/msg/Image" ||
+                  type == "sensor_msgs/msg/CompressedImage")),
             "unsupported topic role/type");
     ++roles[role];
   }
