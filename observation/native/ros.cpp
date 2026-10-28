@@ -2,6 +2,7 @@
 #include "critic_features.hpp"
 #include "evidence.hpp"
 #include "recording.hpp"
+#include "ros_recovery.hpp"
 #include "runtime.hpp"
 #include "events.hpp"
 #include "service.hpp"
@@ -310,6 +311,17 @@ std::pair<bool, Json> validate(const Json &topic, const Json &config,
               finite(point.accelerations) && finite(point.effort);
     return {valid, stamp(m.header.stamp)};
   }
+  if (type == "sensor_msgs/msg/CompressedImage") {
+    // Generic ROS subscriptions have already matched this payload against the
+    // configured CompressedImage type. Some rmw/type-support combinations can
+    // still reject a second typed C++ deserialization even while the same CDR
+    // stream is readable by rosbag2 and the render worker. Capture liveness is
+    // therefore based on a non-empty serialized message and its receipt time;
+    // the recording/index/render pipeline remains responsible for full image
+    // decoding and will surface a modality-specific error if the payload is bad.
+    const auto &bytes = data.get_rcl_serialized_message();
+    return {bytes.buffer != nullptr && bytes.buffer_length > 4, nullptr};
+  }
   const auto m = decode<sensor_msgs::msg::Image>(data);
   return {m.width > 0 && m.height > 0 &&
               m.data.size() == static_cast<std::size_t>(m.height) * m.step,
@@ -320,16 +332,18 @@ class Observer {
   fs::path session_;
   Json config_;
   SessionLock lock_;
-  std::string id_ = unique_id(), prefix_ = "/harness/observation/s_" + id_;
+  std::string id_ = unique_id(), prefix_ = "/rearguard/observation/s_" + id_;
   Evidence evidence_;
   std::unique_ptr<Store> store_;
   CriticInferencePlaceholder no_inference_, runtime_critic_;
   CriticAdapter *inference_ = &no_inference_;
   std::unique_ptr<ProfileCritic> profile_critic_;
-  RecoveryControllerPlaceholder controller_;
-  std::unique_ptr<Runtime> runtime_;
   rclcpp::Node::SharedPtr node_;
   rclcpp::Context::SharedPtr context_;
+  std::unique_ptr<RosControllerAuthority> authority_;
+  std::unique_ptr<RosTrajectoryRecovery> recovery_executor_;
+  std::unique_ptr<SwitchingRecoveryController> controller_;
+  std::unique_ptr<Runtime> runtime_;
   std::unique_ptr<Recording> writer_;
   rclcpp::Publisher<String>::SharedPtr events_, replies_, profiles_;
   std::vector<rclcpp::GenericSubscription::SharedPtr> subscriptions_;
@@ -458,10 +472,19 @@ class Observer {
       tick();
       Json result;
       const auto op = data.at("operation").get<std::string>();
-      if (op == "capture") {
+      if (op == "capture" || op == "incident_capture") {
         evidence_.check_live();
+        // Workflow incidents have one canonical evidence contract. Keep the
+        // T-10s/T+5s window authoritative at the observer boundary so an
+        // intermediary cannot silently coerce the numeric request fields.
+        const auto before = op == "incident_capture"
+                                ? 10.0
+                                : data.at("before").get<double>();
+        const auto after = op == "incident_capture"
+                               ? 5.0
+                               : data.at("after").get<double>();
         auto &window = evidence_.capture(
-            data.at("before").get<double>(), data.at("after").get<double>(),
+            before, after,
             required_text(data.at("label"), "label").substr(0, 2000));
         window["capture_request_id"] = key;
         result = window;
@@ -619,15 +642,20 @@ public:
         profile_critic_ = std::make_unique<ProfileCritic>(deployment);
         inference_ = profile_critic_.get();
       }
-      runtime_ =
-          std::make_unique<Runtime>(*store_, runtime_critic_, controller_);
     }
     rclcpp::NodeOptions node_options;
     node_options.context(context_);
     node_options.parameter_overrides(
         {rclcpp::Parameter("use_sim_time", config_["clock"] == "ros_sim")});
     node_ = std::make_shared<rclcpp::Node>(
-        "harness_observer_" + id_.substr(0, 8), node_options);
+        "rearguard_observer_" + id_.substr(0, 8), node_options);
+    if (store_) {
+      authority_ = std::make_unique<RosControllerAuthority>(context_);
+      recovery_executor_ = std::make_unique<RosTrajectoryRecovery>(context_);
+      controller_ = std::make_unique<SwitchingRecoveryController>(
+          *authority_, *recovery_executor_);
+      runtime_ = std::make_unique<Runtime>(*store_, runtime_critic_, *controller_);
+    }
     const auto *rmw = std::getenv("RMW_IMPLEMENTATION");
     Json meta = {{"schema_version", 1},
                  {"session_id", id_},
@@ -822,7 +850,7 @@ Json discover_domain(Ns domain, Ns settle_ms) {
   // typesupport own process-global state, so domain contexts must not initialize
   // them concurrently in one process.
   RosContext context(domain);
-  const auto scanner_name = "harness_setup_scan_" + unique_id().substr(0, 8);
+  const auto scanner_name = "rearguard_setup_scan_" + unique_id().substr(0, 8);
   rclcpp::NodeOptions node_options;
   node_options.context(context.value);
   auto node = std::make_shared<rclcpp::Node>(scanner_name, node_options);
@@ -1159,9 +1187,13 @@ Json discover_domain(Ns domain, Ns settle_ms) {
         entry["endpoints"].push_back(name.substr(base.size() + 1));
       }
     }
-    const auto marker = name.find("/controller_manager/");
-    if (marker != std::string::npos)
-      controller_managers.insert(name.substr(0, marker + 19));
+    constexpr auto list_controllers_suffix = "/list_controllers";
+    if (name.ends_with(list_controllers_suffix) &&
+        std::find(sorted_types.begin(), sorted_types.end(),
+                  "controller_manager_msgs/srv/ListControllers") !=
+            sorted_types.end())
+      controller_managers.insert(
+          name.substr(0, name.size() - std::strlen(list_controllers_suffix)));
   }
   std::sort(services.begin(), services.end(), [](const Json &a, const Json &b) {
     return a.at("name") < b.at("name");
@@ -1395,7 +1427,7 @@ Json ros_request_payload(const Json &data, const Json &meta) {
   rclcpp::NodeOptions node_options;
   node_options.context(context.value);
   auto node = std::make_shared<rclcpp::Node>(
-      "harness_observation_cli_" + unique_id().substr(0, 8), node_options);
+      "rearguard_observation_cli_" + unique_id().substr(0, 8), node_options);
   const auto prefix = meta.at("prefix").get<std::string>();
   Json response = nullptr;
   auto subscription = node->create_subscription<String>(

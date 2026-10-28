@@ -138,11 +138,11 @@ fs::path export_window(const fs::path &session, const Json &window,
     }
   }
   writer.close();
-  for (const auto &t : config["topics"])
-    if (!t.contains("required") ||
-        t.at("required").get_ref<const Json::boolean_t &>())
-      require(counts[t["name"].get<std::string>()] >= 2,
-              "exported MCAP lacks required topic coverage");
+  for (const auto &group : required_topic_groups(config)) {
+    bool covered = false;
+    for (const auto &name : group) covered = covered || counts[name] >= 2;
+    require(covered, "exported MCAP lacks required topic coverage");
+  }
   std::vector<fs::path> files;
   for (const auto &entry : fs::directory_iterator(destination))
     if (entry.path().extension() == ".mcap")

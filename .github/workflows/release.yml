@@ -38,10 +38,14 @@ jobs:
       - name: Install ROS 2 discovery dependencies
         run: >-
           sudo apt-get install -y
-          ros-jazzy-rclcpp ros-jazzy-rosbag2-cpp
+          ros-jazzy-rclcpp ros-jazzy-rclcpp-action
+          ros-jazzy-rosbag2-cpp
           ros-jazzy-rosbag2-storage-mcap
+          ros-jazzy-control-msgs
+          ros-jazzy-controller-manager-msgs
           ros-jazzy-sensor-msgs ros-jazzy-std-msgs
-          ros-jazzy-trajectory-msgs ros-jazzy-rosgraph-msgs
+          ros-jazzy-trajectory-msgs ros-jazzy-geometry-msgs
+          ros-jazzy-rosgraph-msgs
 
       - name: Generate C++ schemas
         working-directory: schemas
@@ -76,12 +80,39 @@ jobs:
           ./build-release/rearguard scan setup --domain-min 0 --domain-max 0 --settle-ms 1 --parallelism 1 --out "${RUNNER_TEMP}/scan.json"
           artifact="dist/harness-kernel-${GITHUB_REF_NAME#v}-x86_64-linux-gnu.tar.gz"
           test -f "${artifact}"
+          package_root="harness-kernel-${GITHUB_REF_NAME#v}"
+          tar -tzf "${artifact}" | grep -q "${package_root}/bin/rearguard$"
+          tar -tzf "${artifact}" | grep -q "${package_root}/bin/harness_critic$"
+          tar -tzf "${artifact}" | grep -q "${package_root}/lib/libharness_kernel.so"
+          tar -tzf "${artifact}" | grep -q "${package_root}/lib/libthreshold_critic.so"
+          tar -tzf "${artifact}" | grep -q "${package_root}/lib/libstall_critic.so"
           tar -tzf "${artifact}" | grep -q '/share/harness/runtime/edge-runtime.json$'
           tar -tzf "${artifact}" | grep -q '/share/harness/install/install_runtime_deps.sh$'
           if tar -tzf "${artifact}" | grep -q '/share/harness/observation/'; then
             echo "::error::release must not package embodiment-specific observation presets"
             exit 1
           fi
+          extracted="${RUNNER_TEMP}/rearguard-release"
+          mkdir -p "${extracted}"
+          tar -xzf "${artifact}" -C "${extracted}"
+          installed="${extracted}/${package_root}"
+          test "$("${installed}/bin/rearguard" --version)" = "rearguard ${GITHUB_REF_NAME#v}"
+          "${installed}/bin/rearguard" abi
+          critic_usage="${RUNNER_TEMP}/harness-critic-usage.txt"
+          if "${installed}/bin/harness_critic" >"${critic_usage}" 2>&1; then
+            echo "::error::harness_critic unexpectedly accepted an empty command"
+            exit 1
+          fi
+          grep -q 'harness_critic <inspect|seal-engines|score|replay|encode>' "${critic_usage}"
+          for executable in rearguard harness_critic; do
+            if ldd "${installed}/bin/${executable}" | grep -q 'not found'; then
+              echo "::error::packaged ${executable} has unresolved shared libraries"
+              exit 1
+            fi
+          done
+          grep -q '"critic_runtime"[[:space:]]*:[[:space:]]*"native_cpp"' "${installed}/share/harness/runtime/edge-runtime.json"
+          grep -q '"realtime_gate"[[:space:]]*:[[:space:]]*"libharness_kernel_c_abi"' "${installed}/share/harness/runtime/edge-runtime.json"
+          grep -q '"intervention_transport"[[:space:]]*:[[:space:]]*"native_ros2_controller_manager_follow_joint_trajectory"' "${installed}/share/harness/runtime/edge-runtime.json"
 
       - uses: actions/upload-artifact@v4
         with:

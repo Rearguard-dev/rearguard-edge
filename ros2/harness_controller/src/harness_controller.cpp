@@ -207,7 +207,7 @@ std::string HarnessController::build_profile_pb() const
   embodiment->set_joint_order_hash(canonical_joint_order_hash(command_joints_));
 
   auto * binding = profile.mutable_model_binding();
-  binding->set_model_node("/upstream_effort_controller");
+  binding->set_model_node("/rearguard_upstream_effort_controller");
   binding->set_output_topic(std::string("/") + get_node()->get_name() + "/commands");
   binding->set_output_interface(harness::v1::EFFORT);
 
@@ -368,12 +368,11 @@ CallbackReturn HarnessController::on_configure(const rclcpp_lifecycle::State & /
   info_publisher_ = node->create_publisher<harness_msgs::msg::HarnessInfo>(
     "~/info", rclcpp::QoS(1).transient_local().reliable());
 
-  // /diagnostics is global by convention — that is the point. It is where a
-  // customer's existing rqt_robot_monitor, diagnostic aggregator and safety
-  // supervisor already look, so a band transition reaches their monitoring
-  // with no integration work on their side.
+  // Rearguard-owned topology is namespaced explicitly. Integrators may bridge
+  // this into a site-wide /diagnostics aggregator, but Rearguard never creates
+  // an ambiguously owned global endpoint.
   diagnostics_publisher_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
-    "/diagnostics", rclcpp::SystemDefaultsQoS());
+    "/rearguard/diagnostics", rclcpp::SystemDefaultsQoS());
 
   return CallbackReturn::SUCCESS;
 }

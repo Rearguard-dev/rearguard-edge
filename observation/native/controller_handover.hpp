@@ -8,6 +8,9 @@ namespace harness::observation {
 struct ControllerAuthority {
   virtual ~ControllerAuthority() = default;
   virtual bool ready() const = 0;
+  // Bind authority to the exact approved deployment. Implementations must
+  // reject ambiguous controller names or command-interface sets.
+  virtual bool configure(const Json &binding, const Json &contract) = 0;
   virtual bool acquire() = 0;
   virtual bool recovery_owns_commands() = 0;
   virtual bool release() = 0;
@@ -29,12 +32,16 @@ public:
   SwitchingRecoveryController(ControllerAuthority &authority,
                               ControllerAdapter &executor)
       : authority_(authority), executor_(executor) {}
-  bool ready() const override { return authority_.ready() && executor_.ready(); }
+  // Before prepare(), the deployment-specific controller-manager endpoint is
+  // intentionally unknown. Authority readiness is checked after configure().
+  bool ready() const override { return executor_.ready(); }
   bool prepare(const fs::path &artifact, const Json &binding,
                const Json &contract) override {
     if (state_ != State::unprepared && state_ != State::nominal) return false;
     state_ = State::unprepared;
-    if (!ready() || !executor_.prepare(artifact, binding, contract)) return false;
+    if (!authority_.configure(binding, contract) || !authority_.ready() ||
+        !executor_.ready() ||
+        !executor_.prepare(artifact, binding, contract)) return false;
     state_ = State::nominal;
     return true;
   }

@@ -161,7 +161,11 @@ Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
   if (!fs::is_regular_file(state_path))
     return {{"pre_roll_retired", false}, {"reason", "session state missing"}};
   const auto observation = read_json(state_path);
-  const auto heartbeat = observation.value("heartbeat_wall_ns", Ns{0});
+  const auto heartbeat_value =
+      observation.value("heartbeat_wall_ns", Json(nullptr));
+  const auto heartbeat = heartbeat_value.is_number_integer()
+                             ? heartbeat_value.get<Ns>()
+                             : Ns{0};
   const auto heartbeat_age = wall_ns() - heartbeat;
   if (observation.value("status", "") == "observing" && heartbeat > 0 &&
       heartbeat_age >= 0 && heartbeat_age < 30000000000LL)

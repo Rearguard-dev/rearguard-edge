@@ -156,6 +156,10 @@ void binding_tests() {
            {"types", {"sensor_msgs/msg/CompressedImage"}},
            {"publisher_count", 1},
            {"sample", {{"status", "captured"}}}},
+          {{"name", "/front/image_raw/zstd"},
+           {"types", {"sensor_msgs/msg/CompressedImage"}},
+           {"publisher_count", 1},
+           {"sample", {{"status", "captured"}}}},
           {{"name", "/clock"},
            {"types", {"rosgraph_msgs/msg/Clock"}},
            {"publisher_count", 0},
@@ -170,12 +174,16 @@ void binding_tests() {
         "binding uses assignment as metadata and infers a system clock");
   check(binding["joint_order"] == Json::array({"j2", "j1"}),
         "binding preserves observed joint order");
-  check(binding["topics"].size() == 4 &&
+  check(binding["topics"].size() == 5 &&
             binding["topics"][1]["role"] == "action" &&
-            !binding["topics"][1]["required"].get<bool>(),
-        "unpublished command input remains optional evidence");
+            !binding["topics"][1]["required"].get<bool>() &&
+            binding["topics"][2]["name"] == "/front/image_raw/compressed",
+        "unpublished commands remain optional and camera transports stay observable");
+  const auto groups = required_topic_groups(binding);
+  check(groups.size() == 3 && groups[1].size() == 2,
+        "legacy camera transport variants satisfy one physical-camera requirement");
   auto simulated = inventory;
-  simulated["domains"][1]["topics"][4]["sample"]["status"] = "captured";
+  simulated["domains"][1]["topics"][5]["sample"]["status"] = "captured";
   check(compile_observation_binding(simulated, 71, "sim")["clock"] == "ros_sim",
         "only a sampled advancing clock selects simulation time");
 }
@@ -192,9 +200,10 @@ struct FakeCritic final : CriticAdapter {
 struct FakeController final : ControllerAdapter {
   std::string outcome = "running";
   bool hold_ack = true, begin_ack = true, resume_ack = true;
-  int begins = 0, holds = 0;
+  int prepares = 0, begins = 0, holds = 0;
   bool ready() const override { return true; }
   bool prepare(const fs::path &, const Json &, const Json &) override {
+    ++prepares;
     return true;
   }
   bool begin() override { ++begins; return begin_ack; }
@@ -252,6 +261,12 @@ void evidence_tests() {
             history["mark_ns"].get<Ns>() - history["start_ns"].get<Ns>() ==
                 10000000000LL,
         "history-only capture ends at the exact trigger timestamp");
+  const auto &incident = e.capture(10, 5, "incident-contract");
+  check(incident["mark_ns"].get<Ns>() - incident["start_ns"].get<Ns>() ==
+                10000000000LL &&
+            incident["end_ns"].get<Ns>() - incident["mark_ns"].get<Ns>() ==
+                5000000000LL,
+        "incident capture spans exactly T-10s through T+5s");
   e.capture(1, 2, "reset");
   e.tick(1, 100);
   check(e.state["windows"].back()["status"] == "clock_reset",
@@ -651,9 +666,13 @@ void event_tests() {
 }
 struct FakeAuthority final : ControllerAuthority {
   bool acquire_ack = true, release_ack = true, owns_recovery = true,
-       owns_nominal = true;
-  int acquisitions = 0, releases = 0, holds = 0;
+       owns_nominal = true, configure_ack = true;
+  int configurations = 0, acquisitions = 0, releases = 0, holds = 0;
   bool ready() const override { return true; }
+  bool configure(const Json &, const Json &) override {
+    ++configurations;
+    return configure_ack;
+  }
   bool acquire() override { ++acquisitions; return acquire_ack; }
   bool recovery_owns_commands() override { return owns_recovery; }
   bool release() override { ++releases; return release_ack; }
@@ -667,6 +686,8 @@ void handover_tests() {
   check(!controller.begin() && authority.acquisitions == 0,
         "unprepared controller cannot acquire authority");
   check(controller.prepare({}, {}, {}), "handover prepared");
+  check(authority.configurations == 1,
+        "handover binds authority to the approved deployment");
   check(controller.begin() && executor.begins == 1, "exclusive takeover starts executor");
   check(controller.begin() && authority.acquisitions == 1 && executor.begins == 2,
         "retries retain exclusive authority");
@@ -695,6 +716,14 @@ void handover_tests() {
           "switch failure or unconfirmed ownership prevents recovery commands");
     check(c.hold("takeover failed") && port.holds == 1,
           "partial acquisition enters fallback");
+  }
+  {
+    FakeAuthority port;
+    FakeController runner;
+    SwitchingRecoveryController c(port, runner);
+    port.configure_ack = false;
+    check(!c.prepare({}, {}, {}) && runner.prepares == 0,
+          "unbound authority prevents recovery preparation");
   }
   {
     FakeAuthority port;

@@ -3,45 +3,46 @@
 # Topology (build brief §7) — the harness sits BETWEEN the command source and
 # the hardware, not beside it:
 #
-#   /upstream_effort_controller/commands  (Float64MultiArray, you publish here)
+#   /rearguard_upstream_effort_controller/commands  (Float64MultiArray, you publish here)
 #            |
 #            v
-#   upstream_effort_controller  (ForwardCommandController)
-#            |  writes into harness_controller's exported reference interfaces
-#            |  "harness_controller/joint_N/effort"
+#   rearguard_upstream_effort_controller  (ForwardCommandController)
+#            |  writes into rearguard_harness_controller's exported reference interfaces
+#            |  "rearguard_harness_controller/joint_N/effort"
 #            v
-#   harness_controller          (hk_gate runs here)
+#   rearguard_harness_controller          (hk_gate runs here)
 #            |  writes the GATED effort to the hardware command interface
 #            v
 #   joint_N/effort              (mock_components/GenericSystem)
 #
 # Nothing can reach the hardware effort interface except through the gate,
-# because harness_controller claims those interfaces exclusively — that
+# because rearguard_harness_controller claims those interfaces exclusively — that
 # exclusivity is enforced by controller_manager's resource manager, not by
 # convention. Note `golden_joint_order_file` is absent here on purpose: the
 # launch file injects it, since the value is an absolute path that only
 # exists once the package is installed.
 
-controller_manager:
+rearguard_controller_manager:
   ros__parameters:
     update_rate: 200  # Hz
 
-    harness_controller:
+    rearguard_harness_controller:
       type: harness_controller/HarnessController
 
-    upstream_effort_controller:
+    rearguard_upstream_effort_controller:
       type: forward_command_controller/ForwardCommandController
 
-    # Publishes /joint_states and /dynamic_joint_states. It claims only STATE
+    # Publishes /rearguard/joint_states and /rearguard/dynamic_joint_states
+    # through launch remappings. It claims only STATE
     # interfaces, so it cannot interfere with the gate — but it is what makes
     # the gated effort observable through ordinary ROS tooling
-    # (`ros2 topic echo /dynamic_joint_states`) rather than only through the
+    # (`ros2 topic echo /rearguard/dynamic_joint_states`) rather than only through the
     # harness's own topics. GenericSystem mirrors the effort command into the
     # effort state, so what shows up there is what the gate actually emitted.
-    joint_state_broadcaster:
+    rearguard_joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
-harness_controller:
+rearguard_harness_controller:
   ros__parameters:
     # Every joint the rig observes. The golden-order assertion runs against
     # this list.
@@ -97,17 +98,17 @@ harness_controller:
     band_b_reject_rate_window_ms: 500.0
     band_b_reject_rate_max: 0.5
 
-upstream_effort_controller:
+rearguard_upstream_effort_controller:
   ros__parameters:
-    # NOT joint names — these are harness_controller's exported reference
+    # NOT joint names — these are rearguard_harness_controller's exported reference
     # interfaces. ForwardCommandController builds each claimed interface as
     # "<joints[i]>/<interface_name>", which resolves to
-    # "harness_controller/joint_1/effort" — the reference interface the
+    # "rearguard_harness_controller/joint_1/effort" — the reference interface the
     # harness exports. That string match is what chains the two controllers;
     # get it wrong and controller_manager refuses to activate rather than
     # silently bypassing the gate.
     joints:
-      - harness_controller/joint_1
-      - harness_controller/joint_2
-      - harness_controller/joint_3
+      - rearguard_harness_controller/joint_1
+      - rearguard_harness_controller/joint_2
+      - rearguard_harness_controller/joint_3
     interface_name: effort

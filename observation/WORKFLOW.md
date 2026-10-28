@@ -386,7 +386,7 @@ commands, and durably reports their receipts; it does not claim that each
 historical outbox row was delivered individually.
 
 The observer publishes profile revisions as JSON `std_msgs/msg/String` on
-`/harness/observation/s_<session-id>/profile`, reliable/transient-local depth 1,
+`/rearguard/observation/s_<session-id>/profile`, reliable/transient-local depth 1,
 and records them in its bag. Incoming review requests can use the existing
 session `/requests` and `/responses` topics with `operation: workflow` and a
 `workflow_request` containing the same versioned request envelope used by

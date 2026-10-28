@@ -12,7 +12,7 @@
   GenericSystem mirrors each command interface into the state interface of
   the same name, so joint_N/effort reads back whatever the harness controller
   last wrote. That makes the gated command directly observable from
-  /dynamic_joint_states without a simulator in the loop.
+  /rearguard/dynamic_joint_states without a simulator in the loop.
 
   The link geometry is nominal — nothing here is derived from a real
   embodiment, and no threshold may ever be taken from it.

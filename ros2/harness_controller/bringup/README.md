@@ -16,22 +16,22 @@ ros2 run harness_controller harness_flow.py               # terminal 2
 ## Topology
 
 ```
-/upstream_effort_controller/commands   (Float64MultiArray — you publish here)
+/rearguard_upstream_effort_controller/commands   (Float64MultiArray — you publish here)
          |
          v
-upstream_effort_controller             ForwardCommandController
+rearguard_upstream_effort_controller             ForwardCommandController
          |   writes into the harness's exported reference interfaces,
-         |   "harness_controller/joint_N/effort"
+         |   "rearguard_harness_controller/joint_N/effort"
          v
-harness_controller                     hk_gate runs here
+rearguard_harness_controller           hk_gate runs here
          |   writes the GATED effort
          v
 joint_N/effort                         mock_components/GenericSystem
 ```
 
 Nothing reaches the hardware effort interface except through the gate:
-`harness_controller` claims those interfaces exclusively, and
-`controller_manager`'s resource manager enforces that. It is not a matter of
+`rearguard_harness_controller` claims those interfaces exclusively, and
+`rearguard_controller_manager`'s resource manager enforces that. It is not a matter of
 convention or of everyone remembering to publish to the right topic.
 
 The chaining itself is a string match — `ForwardCommandController` claims
@@ -53,9 +53,9 @@ customer's ingest would decode, then narrates it:
 
 Two topics, deliberately different in kind:
 
-- **`/harness_controller/decision`** — a cheap per-cycle mirror of
+- **`/rearguard_harness_controller/decision`** — a cheap per-cycle mirror of
   `hk_gated_command`. Says *what* happened.
-- **`/harness_controller/enforcement_events`** — varint-length-prefixed
+- **`/rearguard_harness_controller/enforcement_events`** — varint-length-prefixed
   `harness.v1.EnforcementEvent` protobufs, drained straight from the kernel's
   event ring and republished as raw bytes. Says *why*: which predicate
   failed, the signed margin, sequence numbers, and how many events were
@@ -92,8 +92,8 @@ declare. Once transferred, every cycle emits the `on_reject` output until the
 controller is reconfigured:
 
 ```
-ros2 control set_controller_state harness_controller inactive
-ros2 control set_controller_state harness_controller active
+ros2 control set_controller_state rearguard_harness_controller inactive -c /rearguard_controller_manager
+ros2 control set_controller_state rearguard_harness_controller active -c /rearguard_controller_manager
 ```
 
 That rebuilds a fresh `hk_handle` through `on_configure`. `harness_flow.py`

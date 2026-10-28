@@ -241,13 +241,19 @@ target_link_libraries(harness_observation PUBLIC nlohmann_json::nlohmann_json
   PRIVATE ${HARNESS_SQLITE_TARGET} OpenSSL::Crypto CURL::libcurl harness_flags)
 if(HARNESS_WITH_ROS2)
   find_package(rclcpp REQUIRED)
+  find_package(rclcpp_action REQUIRED)
   find_package(rosbag2_cpp REQUIRED)
+  find_package(control_msgs REQUIRED)
+  find_package(controller_manager_msgs REQUIRED)
   find_package(sensor_msgs REQUIRED)
   find_package(std_msgs REQUIRED)
   find_package(trajectory_msgs REQUIRED)
   find_package(rosgraph_msgs REQUIRED)
-  target_sources(harness_observation PRIVATE observation/native/ros.cpp observation/native/recording.cpp)
+  target_sources(harness_observation PRIVATE observation/native/ros.cpp
+    observation/native/recording.cpp observation/native/ros_recovery.cpp)
   target_link_libraries(harness_observation PUBLIC rclcpp::rclcpp rosbag2_cpp::rosbag2_cpp
+    rclcpp_action::rclcpp_action
+    ${control_msgs_TARGETS} ${controller_manager_msgs_TARGETS}
     sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
     std_msgs::std_msgs__rosidl_typesupport_cpp
     trajectory_msgs::trajectory_msgs__rosidl_typesupport_cpp
@@ -321,6 +327,10 @@ if(HARNESS_BUILD_TESTS)
     COMMAND ${CMAKE_COMMAND}
       -DCLI=$<TARGET_FILE:harness_cli>
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_lifecycle_test.cmake)
+  add_test(NAME harness_uninstall_tests
+    COMMAND ${CMAKE_COMMAND}
+      -DCLI=$<TARGET_FILE:harness_cli>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_test.cmake)
   add_executable(harness_tiny_critic_tests tests/unit/tiny_critic_test.cpp)
   target_link_libraries(harness_tiny_critic_tests PRIVATE harness_tiny_critic harness_flags)
   add_test(NAME harness_tiny_critic_tests COMMAND harness_tiny_critic_tests)
@@ -329,6 +339,10 @@ if(HARNESS_BUILD_TESTS)
   target_compile_definitions(harness_observation_tests PRIVATE
     HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json")
   add_test(NAME harness_observation_tests COMMAND harness_observation_tests)
+  add_test(NAME harness_topology_prefix_tests
+    COMMAND ${CMAKE_COMMAND}
+      -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/topology_prefix_test.cmake)
   if(HARNESS_WITH_ROS2)
     add_executable(harness_observation_ros_tests tests/unit/observation_ros_test.cpp)
     target_link_libraries(harness_observation_ros_tests PRIVATE harness_observation harness_flags)

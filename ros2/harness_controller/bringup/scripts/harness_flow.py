@@ -15,19 +15,19 @@ Modes:
 
 What it subscribes to. Three topics, deliberately different in kind:
 
-  /harness_controller/info                harness_msgs/HarnessInfo
+  /rearguard_harness_controller/info                harness_msgs/HarnessInfo
       Latched (transient-local), published once per activation: profile
       identity, the ordered joint names, the joint-order hash and the declared
       bounds. Every positional array below is indexed by that ordering, and
       reading them without it is a mistake no wire format can prevent.
 
-  /harness_controller/gate_status         harness_msgs/GateStatus
+  /rearguard_harness_controller/gate_status         harness_msgs/GateStatus
       The OPERATIONAL view, one message per control cycle: decision, band,
       candidate and emitted. Says WHAT happened, in a form an integrator can
       wire into their own logic without decoding protobuf. `emitted` here is
       authoritative for what reached the actuator.
 
-  /harness_controller/enforcement_events  harness_msgs/EnforcementEvents
+  /rearguard_harness_controller/enforcement_events  harness_msgs/EnforcementEvents
       A TAP on the kernel's event ring — NOT the system of record, which is
       the MCAP episode written in-process. A self-describing envelope
       (schema + encoding) around varint-delimited harness.v1.EnforcementEvent
@@ -40,7 +40,7 @@ these topics describe it and never carry it. And the controller republishes
 the event bytes without parsing them, so protobuf decoding never touches the
 control loop — it happens out here, which is exactly the split intended.
 
-Operational health also goes to /diagnostics as a DiagnosticArray, where a
+Operational health also goes to /rearguard/diagnostics as a DiagnosticArray, where a
 customer's existing rqt_robot_monitor or aggregator picks it up for free.
 """
 
@@ -74,7 +74,7 @@ def _load_generated_protobuf():
 
     # Walk up from both the script and the working directory looking for
     # schemas/gen/python. A fixed number of ".." steps would only be right in
-    # the source tree: installed (install/harness_controller/lib/
+    # the source tree: installed (install/rearguard_harness_controller/lib/
     # harness_controller/) the script sits at a completely different depth,
     # and with --symlink-install it sits at yet another.
     def _walk_up(start: str):
@@ -268,7 +268,7 @@ class Observation:
 
 class HarnessFlow(Node):
     def __init__(self, n_joints: int = 3):
-        super().__init__("harness_flow")
+        super().__init__("rearguard_harness_flow")
         self.n_joints = n_joints
         self.obs = Observation()
         self._band_seen = "NOMINAL"
@@ -280,20 +280,20 @@ class HarnessFlow(Node):
         qos = QoSProfile(depth=200, reliability=ReliabilityPolicy.BEST_EFFORT)
 
         self.command_pub = self.create_publisher(
-            Float64MultiArray, "/upstream_effort_controller/commands", 10
+            Float64MultiArray, "/rearguard_upstream_effort_controller/commands", 10
         )
         self.create_subscription(
-            GateStatus, "/harness_controller/gate_status", self._on_decision, qos
+            GateStatus, "/rearguard_harness_controller/gate_status", self._on_decision, qos
         )
         self.create_subscription(
-            EnforcementEvents, "/harness_controller/enforcement_events", self._on_events, qos
+            EnforcementEvents, "/rearguard_harness_controller/enforcement_events", self._on_events, qos
         )
         # Latched identity. Transient-local so this still arrives even though
         # the controller published it before this script started.
         self.info = None
         self.create_subscription(
             HarnessInfo,
-            "/harness_controller/info",
+            "/rearguard_harness_controller/info",
             self._on_info,
             QoSProfile(
                 depth=1,
@@ -435,10 +435,11 @@ def check_ready(node: HarnessFlow) -> bool:
 
     if not node.obs.decisions:
         print(
-            "\n  No messages on /harness_controller/decision.\n"
+            "\n  No messages on /rearguard_harness_controller/decision.\n"
             "  The controller is not active. Check the launch terminal, then:\n"
-            "      ros2 control list_controllers\n"
-            "  Both harness_controller and upstream_effort_controller should be 'active'."
+            "      ros2 control list_controllers -c /rearguard_controller_manager\n"
+            "  Both rearguard_harness_controller and "
+            "rearguard_upstream_effort_controller should be 'active'."
         )
         return False
 
@@ -448,8 +449,8 @@ def check_ready(node: HarnessFlow) -> bool:
             "\n  The controller is ALREADY in Band B — a previous run left it there, and\n"
             "  Band B is terminal in this ABI. Everything from here would emit 0.0 and the\n"
             "  walkthrough would be meaningless. Reset it with:\n"
-            "      ros2 control set_controller_state harness_controller inactive\n"
-            "      ros2 control set_controller_state harness_controller active\n"
+            "      ros2 control set_controller_state rearguard_harness_controller inactive -c /rearguard_controller_manager\n"
+            "      ros2 control set_controller_state rearguard_harness_controller active -c /rearguard_controller_manager\n"
             "  (deactivate/activate rebuilds a fresh hk_handle through on_configure)"
         )
         return False
@@ -524,8 +525,8 @@ SCENARIOS = [
             "emitted stays 0.0. A well-behaved command does NOT win authority back. To "
             "recover, deactivate and reactivate the controller (which builds a fresh "
             "hk_handle via on_configure):\n"
-            "      ros2 control set_controller_state harness_controller inactive\n"
-            "      ros2 control set_controller_state harness_controller active"
+            "      ros2 control set_controller_state rearguard_harness_controller inactive -c /rearguard_controller_manager\n"
+            "      ros2 control set_controller_state rearguard_harness_controller active -c /rearguard_controller_manager"
         ),
     ),
 ]
@@ -536,10 +537,12 @@ def run_walkthrough(node: HarnessFlow, auto: bool):
     print("harness controller — flow of enforcement")
     print(RULE)
     print(
-        "\nTopology: you publish to /upstream_effort_controller/commands; that controller\n"
-        "writes into harness_controller's exported reference interfaces; harness_controller\n"
+        "\nTopology: you publish to /rearguard_upstream_effort_controller/commands; that controller\n"
+        "writes into rearguard_harness_controller's exported reference interfaces; "
+        "rearguard_harness_controller\n"
         "runs hk_gate and writes the GATED effort to the hardware. Nothing reaches the\n"
-        "effort interface except through the gate — controller_manager's resource manager\n"
+        "effort interface except through the gate — rearguard_controller_manager's "
+        "resource manager\n"
         "enforces that exclusivity, so it is not a matter of convention.\n"
     )
 

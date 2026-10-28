@@ -104,7 +104,7 @@ private:
   // --- observability, read by the non-RT diagnostics timer ----------------
   //
   // The control path only ever stores into these. Reporting — logging a band
-  // transition, publishing /diagnostics — happens in publish_diagnostics(),
+  // transition, publishing /rearguard/diagnostics — happens in publish_diagnostics(),
   // which the controller_manager executor serves on a normal thread. That
   // keeps allocation and I/O off the decision path, which a plain
   // RCLCPP_WARN in update() would not.

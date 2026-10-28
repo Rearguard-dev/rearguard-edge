@@ -72,6 +72,7 @@ echo "== test"
 (cd "$BUILD" && ctest --output-on-failure)
 
 echo "== sanitizers"
+# shellcheck disable=SC2086
 cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug \
   -DHARNESS_VERSION="$VERSION" -DHARNESS_WITH_ROS2="$WITH_ROS2" \
   -DHARNESS_SANITIZE=ON > /dev/null

@@ -73,20 +73,22 @@ void Evidence::check_live(Ns wall) const {
   require(now && *now > 0 && last_clock_advance, "ROS clock has not started");
   require(wall - *last_clock_advance <= 10000000000LL,
           "ROS clock stopped advancing; capture refused");
-  for (const auto &t : config["topics"])
-    if (t.value("required", true)) {
-      const auto name = t["name"].get<std::string>();
+  for (const auto &group : required_topic_groups(config)) {
+    bool live = false;
+    for (const auto &name : group) {
       const auto &history = samples.at(name);
-      require(!history.empty() && history.back()["valid"].get<bool>() &&
-                  wall - history.back()["receipt_monotonic_ns"].get<Ns>() <=
-                      10000000000LL,
-              "required topic missing, invalid or stale: " + name);
+      if (history.empty() || !history.back()["valid"].get<bool>() ||
+          wall - history.back()["receipt_monotonic_ns"].get<Ns>() > 10000000000LL)
+        continue;
       const auto &source = history.back()["source_ns"];
-      if (!source.is_null())
-        require(*now - source.get<Ns>() >= -1000000000LL &&
-                    *now - source.get<Ns>() <= 5000000000LL,
-                "required topic source timestamp stale or ahead: " + name);
+      if (!source.is_null() && (*now - source.get<Ns>() < -1000000000LL ||
+                                *now - source.get<Ns>() > 5000000000LL))
+        continue;
+      live = true;
+      break;
     }
+    require(live, "required topic group missing, invalid or stale: " + group.front());
+  }
 }
 void Evidence::expire(Ns wall) {
   if (last_clock_advance && wall - *last_clock_advance > 15000000000LL)
@@ -132,12 +134,13 @@ Json Evidence::promote(const std::string &id, const std::string &description,
   for (const auto &f : state["failures"])
     if (f["window_id"] == id)
       return f;
-  for (const auto &t : config["topics"])
-    if (t.value("required", true))
-      require((*window)["coverage"]
-                      .at(t["name"].get<std::string>())["valid_count"]
-                      .get<Ns>() >= 2,
-              "insufficient valid observations in window");
+  for (const auto &group : required_topic_groups(config)) {
+    bool covered = false;
+    for (const auto &name : group)
+      covered = covered || ((*window)["coverage"].contains(name) &&
+                            (*window)["coverage"].at(name).value("valid_count", 0) >= 2);
+    require(covered, "insufficient valid observations in window");
+  }
   Json failure = {{"id", "f-" + unique_id().substr(0, 12)},
                   {"window_id", id},
                   {"description", description},

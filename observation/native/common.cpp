@@ -208,6 +208,33 @@ std::string required_text(const Json &value, const std::string &name) {
           name + " must be nonempty text (at most 16000 bytes)");
   return text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
 }
+std::string camera_source_name(std::string name) {
+  for (const auto *suffix : {"/compressedDepth", "/compressed", "/zstd"})
+    if (name.ends_with(suffix))
+      return name.substr(0, name.size() - std::char_traits<char>::length(suffix));
+  return name;
+}
+std::vector<std::vector<std::string>> required_topic_groups(const Json &config) {
+  std::vector<std::vector<std::string>> groups;
+  std::map<std::string, std::size_t> camera_groups;
+  for (const auto &topic : config.at("topics")) {
+    if (!topic.value("required", true)) continue;
+    const auto name = topic.at("name").get<std::string>();
+    if (topic.value("role", "") != "camera") {
+      groups.push_back({name});
+      continue;
+    }
+    const auto source = camera_source_name(name);
+    const auto found = camera_groups.find(source);
+    if (found == camera_groups.end()) {
+      camera_groups[source] = groups.size();
+      groups.push_back({name});
+    } else {
+      groups[found->second].push_back(name);
+    }
+  }
+  return groups;
+}
 Json load_config(const fs::path &path) {
   auto c = read_json(observation_config_path(path));
   require(c.value("schema_version", 0) == 1 &&

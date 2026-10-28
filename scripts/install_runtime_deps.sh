@@ -10,7 +10,18 @@ have_runtime() {
   [ -r /opt/ros/jazzy/setup.sh ] &&
     [ -d /opt/ros/jazzy ] &&
     find /opt/ros/jazzy -type f \( -name 'librosbag2_storage_mcap.so' -o -name 'librosbag2_storage_mcap.so.*' \) \
-      -print -quit 2>/dev/null | grep -q .
+      -print -quit 2>/dev/null | grep -q . &&
+    command -v dpkg-query >/dev/null 2>&1 &&
+    for package in \
+      ros-jazzy-rclcpp ros-jazzy-rclcpp-action \
+      ros-jazzy-rosbag2-cpp ros-jazzy-rosbag2-storage-mcap \
+      ros-jazzy-control-msgs ros-jazzy-controller-manager-msgs \
+      ros-jazzy-sensor-msgs ros-jazzy-std-msgs \
+      ros-jazzy-trajectory-msgs ros-jazzy-geometry-msgs \
+      ros-jazzy-rosgraph-msgs ros-jazzy-rmw-cyclonedds-cpp
+    do
+      dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$' || return 1
+    done
 }
 
 if have_runtime; then
@@ -45,8 +56,11 @@ sudo apt-get update
 sudo apt-get install -y \
   ros-jazzy-ros-base \
   ros-jazzy-rclcpp \
+  ros-jazzy-rclcpp-action \
   ros-jazzy-rosbag2-cpp \
   ros-jazzy-rosbag2-storage-mcap \
+  ros-jazzy-control-msgs \
+  ros-jazzy-controller-manager-msgs \
   ros-jazzy-sensor-msgs \
   ros-jazzy-std-msgs \
   ros-jazzy-trajectory-msgs \

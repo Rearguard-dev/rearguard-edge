@@ -235,25 +235,27 @@
       }
     },
     "incident_response": {
-      "description": "Capture and show synchronized incident evidence first; require operator approval unless a validated critic makes a high-confidence exact proposition match with a linked approved recovery.",
+      "description": "Capture and show synchronized incident evidence first, then attach it to a failure proposition, describe the specific occurrence, and collect recovery guidance before generation.",
       "entry_step": "capture",
       "steps": {
         "capture": { "opening": "Capture an approximately fifteen-second incident window, then wait for synchronized evidence before asking the operator to classify it.", "opening_artifacts": [], "actions": {
           "report_incident": { "description": "The operator requested evidence capture; this is not approval that a failure occurred.", "next_step": "awaiting_evidence", "handler": "report_incident", "artifacts": ["workflow_command", "incident_workflow"] }
         }},
         "awaiting_evidence": { "opening": "Wait until the exact MCAP evidence window is ready, then make its video, time series, commands and controller streams the primary review artifact.", "opening_artifacts": [], "actions": {
-          "continue_incident": { "description": "Check whether the synchronized evidence is ready for review.", "next_step": "evidence_review", "handler": "inspect_incident_evidence", "artifacts": ["incident_workflow"] }
+          "continue_incident": { "description": "Check whether the synchronized evidence is ready, then show the profile's failure propositions for attachment.", "next_step": "attach", "handler": "inspect_incident_evidence", "artifacts": ["incident_workflow", "incident_propositions"] },
+          "retry_incident": { "description": "Retry a capture request after the edge rejected the prior request.", "next_step": "awaiting_evidence", "handler": "report_incident", "artifacts": ["workflow_command", "incident_workflow"] }
         }},
-        "evidence_review": { "opening": "Ask the operator to approve or reject the incident only after reviewing the synchronized evidence. Explain when a validated high-confidence proposition/recovery match has made approval unnecessary.", "opening_artifacts": [], "actions": {
-          "approve_incident": { "description": "The operator confirms that the reviewed evidence is a real incident.", "suggested_reply": "Yes, this is a failure", "next_step": "describe", "handler": "state_only", "artifacts": [] },
+        "evidence_review": { "opening": "Show the synchronized evidence and ask the operator to describe what failed. Supplying a description confirms the reviewed window is a real incident; the operator can still reject it as normal behavior.", "opening_artifacts": [], "actions": {
+          "incident_described": { "description": "The operator confirms the reviewed evidence by describing the failure; store that description and show propositions it can be attached to.", "next_step": "attach", "handler": "capture_incident_description", "artifacts": ["incident_workflow", "incident_propositions"] },
           "reject_incident": { "description": "The operator rejects the reviewed evidence as a failure.", "suggested_reply": "No, this looks normal", "next_step": "complete", "handler": "reject_incident", "artifacts": ["workflow_command", "incident_workflow"] }
         }},
-        "describe": { "opening": "Ask for a concise incident-level description of what happened.", "opening_artifacts": [], "actions": {
-          "incident_described": { "description": "Store the operator's incident description and show failure propositions that it can be attached to.", "next_step": "attach", "handler": "capture_incident_description", "artifacts": ["incident_workflow", "incident_propositions"] }
+        "describe": { "opening": "Ask for a concise description of what happened in this specific occurrence after its proposition is attached.", "opening_artifacts": [], "actions": {
+          "incident_described": { "description": "Store the operator's description of this specific occurrence.", "next_step": "guidance", "handler": "capture_incident_description", "artifacts": ["incident_workflow"] }
         }},
-        "attach": { "opening": "Ask the operator to attach the incident to one existing failure proposition or create a new one.", "opening_artifacts": [], "actions": {
-          "existing_proposition": { "description": "Attach this incident to an existing proposition. Value must be its exact ID.", "next_step": "guidance", "handler": "select_incident_proposition", "artifacts": ["incident_workflow", "selection_not_found"] },
-          "new_proposition": { "description": "Create a new failure proposition from the operator's description.", "suggested_reply": "Create a new proposition", "next_step": "guidance", "handler": "create_incident_proposition", "artifacts": ["incident_workflow"] }
+        "attach": { "opening": "Ask the operator to attach the incident using the contextual pills for existing propositions. If none fits, they can describe a new proposition in their own words.", "opening_artifacts": [], "actions": {
+          "existing_proposition": { "description": "Attach this incident to an existing proposition. Value must be its exact ID.", "next_step": "describe", "handler": "select_incident_proposition", "artifacts": ["incident_workflow", "selection_not_found"] },
+          "new_proposition": { "description": "Create a new failure proposition category when the operator writes it in their own words before describing this specific occurrence.", "next_step": "describe", "handler": "create_incident_proposition", "artifacts": ["incident_workflow"] },
+          "reject_incident": { "description": "The operator rejects the reviewed evidence as a failure.", "suggested_reply": "No, this looks normal", "next_step": "complete", "handler": "reject_incident", "artifacts": ["workflow_command", "incident_workflow"] }
         }},
         "guidance": { "opening": "Ask what the robot should do to recover safely from this specific failure.", "opening_artifacts": [], "actions": {
           "guidance_provided": { "description": "Store recovery guidance after the operator has approved the reviewed evidence.", "next_step": "awaiting_acceptance", "handler": "collect_incident_guidance", "artifacts": ["incident_workflow"] }

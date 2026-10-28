@@ -284,13 +284,22 @@ void setup_snapshot_test() {
   require(find("/setup_test/silent")["status"] == "timeout", "silent topic must time out");
   require(find("/setup_test/text")["data"] == "first", "setup sample was overwritten");
   for (const auto &entry : domain["nodes"])
-    require(!entry["fq_name"].get<std::string>().starts_with("/harness_setup_scan_"),
+    require(!entry["fq_name"].get<std::string>().starts_with("/rearguard_setup_scan_"),
             "scanner leaked into setup graph");
   context->shutdown("setup snapshot test complete");
 }
 void live_test(const fs::path &root) {
   auto config = load_config(HARNESS_OBSERVATION_CONFIG);
   config["clock"] = "ros_system";
+  // Exercise the hardware binding used by incident capture. The live robot
+  // publishes compressed camera transports, and liveness must be established
+  // from the generic subscription's serialized payload without requiring a
+  // second typed deserialization.
+  for (auto &topic : config["topics"])
+    if (topic.value("role", "") == "camera") {
+      topic["name"] = topic["name"].get<std::string>() + "/compressed";
+      topic["type"] = "sensor_msgs/msg/CompressedImage";
+    }
   atomic_json(root / "config.json", config);
   auto store = Store::create(root / "store", root / "config.json");
   const auto session = root / "live";
@@ -311,10 +320,10 @@ void live_test(const fs::path &root) {
       node->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
   auto actions = node->create_publisher<std_msgs::msg::Float64MultiArray>(
       "/arm_controller/commands", 10);
-  auto camera = node->create_publisher<sensor_msgs::msg::Image>(
-      "/camera/image_raw", rclcpp::SensorDataQoS());
-  auto wrist = node->create_publisher<sensor_msgs::msg::Image>(
-      "/wrist_camera/image_raw", rclcpp::SensorDataQoS());
+  auto camera = node->create_publisher<sensor_msgs::msg::CompressedImage>(
+      "/camera/image_raw/compressed", rclcpp::SensorDataQoS());
+  auto wrist = node->create_publisher<sensor_msgs::msg::CompressedImage>(
+      "/wrist_camera/image_raw/compressed", rclcpp::SensorDataQoS());
   rclcpp::ExecutorOptions executor_options;
   executor_options.context = context;
   rclcpp::executors::SingleThreadedExecutor executor(executor_options);
@@ -328,13 +337,10 @@ void live_test(const fs::path &root) {
     std_msgs::msg::Float64MultiArray a;
     a.data.resize(j.name.size());
     actions->publish(a);
-    sensor_msgs::msg::Image image;
+    sensor_msgs::msg::CompressedImage image;
     image.header.stamp = node->now();
-    image.width = 1;
-    image.height = 1;
-    image.step = 3;
-    image.encoding = "rgb8";
-    image.data = {255, 0, 0};
+    image.format = "rgb8; jpeg compressed bgr8";
+    image.data = {0xff, 0xd8, 0xff, 0xd9};
     camera->publish(image);
     wrist->publish(image);
     executor.spin_once(std::chrono::milliseconds(50));

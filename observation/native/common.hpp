@@ -4,6 +4,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace harness::observation {
 using Json = nlohmann::json;
@@ -20,6 +21,8 @@ void atomic_json(const fs::path &path, const Json &value);
 void require(bool condition, const std::string &message);
 std::string required_text(const Json &value, const std::string &name);
 Json load_config(const fs::path &path);
+std::string camera_source_name(std::string name);
+std::vector<std::vector<std::string>> required_topic_groups(const Json &config);
 struct Options {
   std::string command;
   std::map<std::string, std::string> values;

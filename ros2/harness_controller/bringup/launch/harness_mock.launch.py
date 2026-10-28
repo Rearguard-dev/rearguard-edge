@@ -5,8 +5,8 @@ no simulator, real controller manager, real executor, real DDS." This launch
 file is that step. Everything here is real except the physics.
 
 Controller activation order is load-bearing and therefore explicit rather
-than left to chance: harness_controller must be active and exporting its
-reference interfaces BEFORE upstream_effort_controller can claim them.
+than left to chance: rearguard_harness_controller must be active and exporting
+its reference interfaces BEFORE rearguard_upstream_effort_controller can claim them.
 Spawning them concurrently is a race that fails maybe one run in five, with
 an error ("cannot find reference interface") that reads like a typo rather
 than a scheduling problem.
@@ -39,7 +39,7 @@ def _controller_params_with_golden_path(share_dir: str) -> str:
     with open(config_path, "r", encoding="utf-8") as handle:
         params = yaml.safe_load(handle)
 
-    params["harness_controller"]["ros__parameters"]["golden_joint_order_file"] = golden_path
+    params["rearguard_harness_controller"]["ros__parameters"]["golden_joint_order_file"] = golden_path
 
     merged = tempfile.NamedTemporaryFile(
         mode="w", suffix="_harness_controllers.yaml", delete=False, encoding="utf-8"
@@ -64,15 +64,28 @@ def generate_launch_description():
     robot_state_publisher = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
+        name="rearguard_robot_state_publisher",
         output="screen",
         parameters=[{"robot_description": robot_description}],
+        remappings=[
+            ("/robot_description", "/rearguard/robot_description"),
+            ("/tf", "/rearguard/tf"),
+            ("/tf_static", "/rearguard/tf_static"),
+        ],
     )
 
     control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
+        name="rearguard_controller_manager",
         output="screen",
         parameters=[controller_params],
+        remappings=[
+            ("/robot_description", "/rearguard/robot_description"),
+            ("/joint_states", "/rearguard/joint_states"),
+            ("/dynamic_joint_states", "/rearguard/dynamic_joint_states"),
+            ("/diagnostics", "/rearguard/diagnostics"),
+        ],
     )
 
     # Downstream first: it must be exporting reference interfaces before
@@ -80,28 +93,40 @@ def generate_launch_description():
     harness_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["harness_controller", "--controller-manager", "/controller_manager"],
+        name="rearguard_harness_controller_spawner",
+        arguments=[
+            "rearguard_harness_controller",
+            "--controller-manager",
+            "/rearguard_controller_manager",
+        ],
         output="screen",
     )
 
     upstream_spawner = Node(
         package="controller_manager",
         executable="spawner",
+        name="rearguard_upstream_effort_controller_spawner",
         arguments=[
-            "upstream_effort_controller",
+            "rearguard_upstream_effort_controller",
             "--controller-manager",
-            "/controller_manager",
+            "/rearguard_controller_manager",
         ],
         output="screen",
     )
 
     # Claims state interfaces only, so it races with nothing and can come up
-    # whenever. Without it there is no /joint_states or /dynamic_joint_states,
+    # whenever. Without it there is no /rearguard/joint_states or
+    # /rearguard/dynamic_joint_states,
     # and the gated effort is invisible to ordinary ROS tooling.
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
+        name="rearguard_joint_state_broadcaster_spawner",
+        arguments=[
+            "rearguard_joint_state_broadcaster",
+            "--controller-manager",
+            "/rearguard_controller_manager",
+        ],
         output="screen",
     )
 

@@ -315,6 +315,21 @@ artifact needs.*
 
 ## Cut a release
 
+From the `retry.world` monorepo, the supported production path is the export
+script below. It snapshots the committed `edge/` and matching `schemas/` tree
+into `RetryWorld/harness`, tags that downstream snapshot, and lets its Linux
+ROS-enabled release workflow build, test, inspect and publish the exact artifact
+consumed by the installer:
+
+```bash
+./scripts/export_harness_release.sh 0.4.19
+```
+
+Do not copy a locally built binary onto an edge computer and do not use
+`cmake --install` as a production deployment mechanism. The commands below are
+for validating a standalone downstream checkout; the tag workflow invokes the
+same artifact builder with `HARNESS_WITH_ROS2=ON`.
+
 ```bash
 cd edge
 ./scripts/isolation_check.sh          # must pass first

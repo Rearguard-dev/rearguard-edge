@@ -303,9 +303,7 @@ Json run_workflow_sync(const Options &options, bool once) {
     return ros_request_payload(
         {{"schema_version", 1},
          {"request_id", capture_request_id},
-         {"operation", "capture"},
-         {"before", 10.0},
-         {"after", 5.0},
+         {"operation", "incident_capture"},
          {"label", required_text(payload.at("label"), "label")}},
         meta);
   };

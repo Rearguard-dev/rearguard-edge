@@ -19,7 +19,14 @@ template, not a VLM or an inferred recovery policy.
 
 ## Build
 
-On the Linux ROS 2 Jazzy machine, after copying the changed source:
+This section is for source validation on a Linux ROS 2 Jazzy development
+machine. It must not be used to deploy a production edge. Production upgrades
+are published with `scripts/export_harness_release.sh`, then installed only via
+`rearguard uninstall` and `https://rearguard.dev/install` so the signed release
+manifest, runtime dependencies, cleanup and supervisor lifecycle all follow the
+same path.
+
+For local validation:
 
 ```bash
 cd ~/retry.world
@@ -197,7 +204,7 @@ is rejected before any files are created.
 
 Capture/promotion requests and acknowledgements use `std_msgs/msg/String`
 with a version-1 JSON envelope on session-specific
-`/harness/observation/s_<session-id>/requests` and `/responses`. Requests carry
+`/rearguard/observation/s_<session-id>/requests` and `/responses`. Requests carry
 a unique `request_id`; the client retries that ID while waiting up to 15 wall
 seconds. Recent requests are deduplicated; repeated promotion of a window
 returns the original failure. Audit events publish on the matching `/events`

@@ -796,13 +796,13 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
             "candidate requires a completed evidence window");
     require(p.at("binding_hash") == s.at("binding_hash"),
             "candidate robot/topic binding mismatch");
-    for (const auto &t : s["binding"]["topics"])
-      if (t.value("required", true)) {
-        const auto name = t.at("name").get<std::string>();
-        require(w["coverage"].contains(name) &&
-                    w["coverage"][name].value("valid_count", 0) >= 2,
-                "candidate lacks required topic coverage");
-      }
+    for (const auto &group : required_topic_groups(s["binding"])) {
+      bool covered = false;
+      for (const auto &name : group)
+        covered = covered || (w["coverage"].contains(name) &&
+                              w["coverage"][name].value("valid_count", 0) >= 2);
+      require(covered, "candidate lacks required topic coverage");
+    }
     const auto &d = p.at("detection");
     range(d.at("confidence"), 0, 1, "confidence");
     for (const auto *key : {"detector_id", "evidence_class", "source"})

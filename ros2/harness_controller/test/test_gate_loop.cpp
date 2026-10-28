@@ -100,7 +100,7 @@ std::unique_ptr<Rig> make_rig(double band_b_reject_rate_max = 1.0)
      rclcpp::Parameter("band_b_reject_rate_window_ms", 500.0),
      rclcpp::Parameter("band_b_reject_rate_max", band_b_reject_rate_max)});
 
-  if (rig->controller->init("harness_controller", "", 200, "", options) !=
+  if (rig->controller->init("rearguard_harness_controller", "", 200, "", options) !=
     controller_interface::return_type::OK)
   {
     ADD_FAILURE() << "controller init() failed";

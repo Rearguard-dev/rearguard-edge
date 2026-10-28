@@ -45,7 +45,7 @@ std::shared_ptr<controller_interface::ChainableControllerInterface> load_control
      rclcpp::Parameter("test_torque_limit_nm", 40.0)});
 
   const auto init_result =
-    controller->init("test_harness_controller", "", 500, "", options);
+    controller->init("rearguard_test_harness_controller", "", 500, "", options);
   EXPECT_EQ(init_result, controller_interface::return_type::OK);
   return controller;
 }

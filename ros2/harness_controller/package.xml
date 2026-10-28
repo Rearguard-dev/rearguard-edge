@@ -27,7 +27,7 @@
        kernel's C ABI. Integrators depend on harness_msgs, not on this
        package's internals. -->
   <depend>harness_msgs</depend>
-  <!-- /diagnostics is where a customer's existing monitoring already looks. -->
+  <!-- Rearguard-owned diagnostics remain visibly namespaced on the ROS graph. -->
   <depend>diagnostic_msgs</depend>
 
   <!-- Mock bring-up (bringup/): not needed to build or ship the plugin, only
