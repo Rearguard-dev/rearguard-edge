@@ -239,6 +239,14 @@ add_library(harness_observation STATIC
 target_include_directories(harness_observation PUBLIC observation/native)
 target_link_libraries(harness_observation PUBLIC nlohmann_json::nlohmann_json
   PRIVATE ${HARNESS_SQLITE_TARGET} OpenSSL::Crypto CURL::libcurl harness_flags)
+# GCC 13 can report a null-dereference false positive inside nlohmann/json's
+# inlined tagged-union accessors when a Json::value() call is optimized. Keep
+# the diagnostic visible, but do not promote an external-header warning to a
+# release-blocking error. Real project warnings remain fatal.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(harness_observation PRIVATE
+    -Wno-error=null-dereference)
+endif()
 if(HARNESS_WITH_ROS2)
   find_package(rclcpp REQUIRED)
   find_package(rclcpp_action REQUIRED)

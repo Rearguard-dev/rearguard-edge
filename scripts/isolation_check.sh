@@ -81,10 +81,20 @@ fi
 
 echo "== standalone build + test"
 GEN=""; command -v ninja >/dev/null 2>&1 && GEN="-G Ninja"
+CONFIGURE_LOG="$TMP/configure.log"
+BUILD_LOG="$TMP/build.log"
 # shellcheck disable=SC2086
-cmake -S "$TMP/edge" -B "$TMP/build" $GEN -DCMAKE_BUILD_TYPE=Release \
-  -DHARNESS_SCHEMAS_GEN_CPP="$TMP/schemas/gen/cpp" > /dev/null
-cmake --build "$TMP/build" --parallel > /dev/null
+if ! cmake -S "$TMP/edge" -B "$TMP/build" $GEN -DCMAKE_BUILD_TYPE=Release \
+  -DHARNESS_SCHEMAS_GEN_CPP="$TMP/schemas/gen/cpp" >"$CONFIGURE_LOG" 2>&1; then
+  echo "FAIL: standalone configure failed" >&2
+  cat "$CONFIGURE_LOG" >&2
+  exit 1
+fi
+if ! cmake --build "$TMP/build" --parallel >"$BUILD_LOG" 2>&1; then
+  echo "FAIL: standalone build failed" >&2
+  cat "$BUILD_LOG" >&2
+  exit 1
+fi
 (cd "$TMP/build" && ctest --output-on-failure)
 
 echo "== exported symbol surface"
