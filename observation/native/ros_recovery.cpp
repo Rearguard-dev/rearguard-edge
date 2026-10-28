@@ -22,22 +22,25 @@ using Follow = control_msgs::action::FollowJointTrajectory;
 
 struct PrivateExecutor {
   rclcpp::Node::SharedPtr node;
-  rclcpp::executors::SingleThreadedExecutor executor;
+  std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor;
   std::thread thread;
   bool stopped = false;
 
   PrivateExecutor(const std::shared_ptr<rclcpp::Context> &context,
                   const std::string &name)
       : node(std::make_shared<rclcpp::Node>(
-            name, rclcpp::NodeOptions().context(context))),
-        executor(rclcpp::ExecutorOptions().context(context)) {
-    executor.add_node(node);
-    thread = std::thread([this] { executor.spin(); });
+            name, rclcpp::NodeOptions().context(context))) {
+    rclcpp::ExecutorOptions options;
+    options.context = context;
+    executor =
+        std::make_unique<rclcpp::executors::SingleThreadedExecutor>(options);
+    executor->add_node(node);
+    thread = std::thread([this] { executor->spin(); });
   }
   void stop() {
     if (stopped) return;
     stopped = true;
-    executor.cancel();
+    executor->cancel();
     if (thread.joinable()) thread.join();
   }
   ~PrivateExecutor() { stop(); }
@@ -124,7 +127,7 @@ struct RosControllerAuthority::Impl {
     request->strictness =
         controller_manager_msgs::srv::SwitchController::Request::STRICT;
     request->activate_asap = true;
-    request->timeout = rclcpp::Duration(timeout).to_msg();
+    request->timeout = rclcpp::Duration(timeout);
     auto future = change->async_send_request(request);
     return future.wait_for(timeout + 100ms) == std::future_status::ready &&
            future.get()->ok && owns(activate);
@@ -225,7 +228,7 @@ struct RosTrajectoryRecovery::Impl {
       const auto ms = point.at("time_from_start_ms").get<std::int64_t>();
       require(ms > 0, "recovery waypoint time must be positive");
       target.time_from_start =
-          rclcpp::Duration(std::chrono::milliseconds(ms)).to_msg();
+          rclcpp::Duration(std::chrono::milliseconds(ms));
       message.trajectory.points.push_back(std::move(target));
     }
     require(!message.trajectory.points.empty(), "recovery stage has no waypoints");
@@ -324,7 +327,8 @@ bool RosTrajectoryRecovery::prepare(const fs::path &artifact,
         binding.at("nominal_controller").at("command_topic"),
         "nominal_controller.command_topic");
     impl_->joints_sub = impl_->ros.node->create_subscription<sensor_msgs::msg::JointState>(
-        joint_topic, rclcpp::SensorDataQoS(), [this](const auto &message) {
+        joint_topic, rclcpp::SensorDataQoS(),
+        [this](sensor_msgs::msg::JointState::ConstSharedPtr message) {
           std::map<std::string, double> positions;
           for (std::size_t i = 0;
                i < std::min(message->name.size(), message->position.size()); ++i)
@@ -340,7 +344,8 @@ bool RosTrajectoryRecovery::prepare(const fs::path &artifact,
         });
     impl_->nominal_sub =
         impl_->ros.node->create_subscription<std_msgs::msg::Float64MultiArray>(
-            nominal_topic, rclcpp::SensorDataQoS(), [this](const auto &message) {
+            nominal_topic, rclcpp::SensorDataQoS(),
+            [this](std_msgs::msg::Float64MultiArray::ConstSharedPtr message) {
               if (message->data.size() != impl_->joint_order.size() ||
                   !std::all_of(message->data.begin(), message->data.end(),
                                [](double value) { return std::isfinite(value); }))
