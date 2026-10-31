@@ -317,6 +317,11 @@ if(HARNESS_WITH_ROS2)
   find_package(geometry_msgs REQUIRED)
   target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_ros.cpp)
   target_link_libraries(harness_tiny_critic PRIVATE geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
+  # ros.cpp calls make_learned_critic(), implemented in replay_ros.cpp. Declare
+  # the reverse static-library dependency so CMake repeats the archive cycle
+  # (observation -> tiny_critic -> observation) for one-pass ELF linkers.
+  # Executable-level link order alone fails for observation-only consumers.
+  target_link_libraries(harness_observation PRIVATE harness_tiny_critic)
 else()
   target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_unavailable.cpp)
 endif()
