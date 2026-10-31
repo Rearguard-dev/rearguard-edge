@@ -1,6 +1,7 @@
 #include "critic.hpp"
 #include "worker.hpp"
 #include "propositions.hpp"
+#include "exit_gate.hpp"
 #include "critic_features.hpp"
 #include <cmath>
 #include <future>
@@ -11,6 +12,13 @@ using namespace harness::tiny;
 using harness::observation::require;
 int main() {
   try {
+    ExitGate exit;
+    require(!exit.update(true, 1, .5, 0, 0, 0, 100, 50), "exit persistence begins");
+    require(exit.update(true, 1, .5, 60, 60, 0, 100, 50), "persisted exit satisfies");
+    require(!exit.update(false, 1, .5, 70, 70, 0, 100, 50), "unknown resets exit");
+    require(!exit.update(true, 1, .5, 80, 80, 0, 100, 50), "persistence restarts");
+    require(!exit.update(true, 1, .5, 80, 200, 0, 100, 50), "stale evidence blocks exit");
+    require(!exit.update(true, 1, .5, 210, 210, 1, 100, 50), "epoch reset blocks old persistence");
     harness::observation::CriticFeatureAccumulator feature_accumulator;
     feature_accumulator.joint({0.1, -0.2}, {0.3, -0.4}, {0.5, -0.6});
     feature_accumulator.action({0.2, -0.1});

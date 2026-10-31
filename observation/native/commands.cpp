@@ -99,7 +99,7 @@ Json workflow(const Options &o) {
 }
 Json observe(const Options &o) {
   if (o.command == "start") {
-    o.allow("--config --session --store --storage --domain-id --wall-timeout");
+    o.allow("--config --session --store --storage --domain-id --wall-timeout --critic-bundle --critic-client");
     return ros_start(o);
   }
   if (o.command == "profile" && o.values.contains("--config")) {

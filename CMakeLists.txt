@@ -6,8 +6,7 @@
 #
 # schemas/gen/cpp is gitignored generated output, not committed source (see
 # schemas/.gitignore), so a fresh clone must run codegen before configuring:
-# `buf generate` in schemas/, or scripts/install_harness.sh, which does that
-# first and then runs exactly this build.
+# `npm ci && buf generate` in schemas/ before running this build.
 #
 # Protobuf is a required dependency now: profile.proto is the single source of
 # truth for the Harness Profile (build brief §3), and nothing in edge/ hand-
@@ -69,7 +68,7 @@ if(NOT EXISTS "${HARNESS_SCHEMAS_GEN_CPP}/harness/v1/profile.pb.cc")
     "No protobuf gencode at ${HARNESS_SCHEMAS_GEN_CPP}.\n"
     "schemas/gen/ is generated per-machine, not committed. Generate it first:\n"
     "  (cd <repo>/schemas && npm ci && buf generate)\n"
-    "or run <repo>/scripts/install_harness.sh, which generates, builds and installs.")
+    "For deployed robots, use the published installer at https://rearguard.dev/install.")
 endif()
 
 # CONFIG mode (protobufConfig.cmake) only exists for protobuf builds that
@@ -299,8 +298,9 @@ add_library(harness_tiny_critic STATIC
 target_include_directories(harness_tiny_critic PUBLIC src/tiny_critic)
 target_link_libraries(harness_tiny_critic PUBLIC harness_observation Threads::Threads PRIVATE harness_flags)
 if(HARNESS_WITH_ONNX)
-  find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h REQUIRED)
-  find_library(ONNXRUNTIME_LIBRARY NAMES onnxruntime REQUIRED)
+  set(ONNXRUNTIME_ROOT "$ENV{ONNXRUNTIME_ROOT}" CACHE PATH "Native ONNX Runtime CPU SDK")
+  find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h HINTS "${ONNXRUNTIME_ROOT}/include" REQUIRED)
+  find_library(ONNXRUNTIME_LIBRARY NAMES onnxruntime HINTS "${ONNXRUNTIME_ROOT}/lib" REQUIRED)
   target_include_directories(harness_tiny_critic SYSTEM PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
   target_link_libraries(harness_tiny_critic PRIVATE ${ONNXRUNTIME_LIBRARY})
   target_compile_definitions(harness_tiny_critic PRIVATE HARNESS_WITH_ONNX=1)
@@ -322,6 +322,7 @@ else()
 endif()
 add_executable(harness_critic src/tiny_critic/main.cpp)
 target_link_libraries(harness_critic PRIVATE harness_tiny_critic harness_flags)
+target_link_libraries(harness_cli PRIVATE harness_tiny_critic)
 
 # ---------------------------------------------------------------------------
 # Tests. Google Test kept out for the same reason the legacy build avoided
@@ -343,7 +344,7 @@ if(HARNESS_BUILD_TESTS)
   target_link_libraries(harness_tiny_critic_tests PRIVATE harness_tiny_critic harness_flags)
   add_test(NAME harness_tiny_critic_tests COMMAND harness_tiny_critic_tests)
   add_executable(harness_observation_tests tests/unit/observation_test.cpp)
-  target_link_libraries(harness_observation_tests PRIVATE harness_observation harness_flags)
+  target_link_libraries(harness_observation_tests PRIVATE harness_tiny_critic harness_flags)
   target_compile_definitions(harness_observation_tests PRIVATE
     HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json")
   add_test(NAME harness_observation_tests COMMAND harness_observation_tests)
@@ -353,7 +354,7 @@ if(HARNESS_BUILD_TESTS)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/topology_prefix_test.cmake)
   if(HARNESS_WITH_ROS2)
     add_executable(harness_observation_ros_tests tests/unit/observation_ros_test.cpp)
-    target_link_libraries(harness_observation_ros_tests PRIVATE harness_observation harness_flags)
+    target_link_libraries(harness_observation_ros_tests PRIVATE harness_tiny_critic harness_flags)
     # GCC 13 reports a null-dereference false positive from std::construct_at
     # while instantiating Jazzy's rclcpp test-side templates. Keep the warning
     # visible, but do not let this external-header diagnostic fail this target.

@@ -44,6 +44,7 @@ class Critic {
   Tensor features_, logits_;
   std::unique_ptr<Engine> vision_engine_, head_engine_;
   Ns last_time_ = -1, epoch_ = -1;
+  bool query_model_ = false;
 public:
   Critic(const fs::path &bundle, const std::string &backend);
   const Spec &spec() const { return spec_; }

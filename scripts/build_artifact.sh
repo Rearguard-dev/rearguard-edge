@@ -21,6 +21,7 @@ cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: build_artifact.sh <version>}"
 WITH_ROS2="${HARNESS_WITH_ROS2:-OFF}"
+WITH_ONNX="${HARNESS_WITH_ONNX:-OFF}"
 # Must match install.sh's TARGET computation exactly (see the comment there) —
 # any drift here is a manifest/tarball 404 on install.
 if [ -z "${TARGET:-}" ]; then
@@ -63,6 +64,7 @@ cmake -S . -B "$BUILD" $GEN \
   -DCMAKE_BUILD_TYPE=Release \
   -DHARNESS_VERSION="$VERSION" \
   -DHARNESS_WITH_ROS2="$WITH_ROS2" \
+  -DHARNESS_WITH_ONNX="$WITH_ONNX" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
 cmake --build "$BUILD" --parallel
 
@@ -75,6 +77,7 @@ echo "== sanitizers"
 # shellcheck disable=SC2086
 cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug \
   -DHARNESS_VERSION="$VERSION" -DHARNESS_WITH_ROS2="$WITH_ROS2" \
+  -DHARNESS_WITH_ONNX="$WITH_ONNX" \
   -DHARNESS_SANITIZE=ON > /dev/null
 cmake --build "$BUILD-san" --parallel > /dev/null
 (cd "$BUILD-san" && ASAN_OPTIONS=detect_leaks=0 ctest --output-on-failure)

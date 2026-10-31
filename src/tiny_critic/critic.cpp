@@ -79,17 +79,31 @@ Critic::Critic(const fs::path &bundle, const std::string &backend)
       image_{Tensor("pixels", {1,3,224,224})}, inputs_(make_inputs(spec_)),
       features_("features", {1,5,256}),
       logits_("logits", {1,static_cast<std::int64_t>(manifest_.at("classes").size())}) {
-  require(manifest_.at("schema_version") == 1 && manifest_.at("architecture") == "tinyclip8m_causal96_v1" &&
+  query_model_ = manifest_.value("architecture", "") == "multimodal_client_queries_v1";
+  require(manifest_.at("schema_version") == 1 && (query_model_ || manifest_.at("architecture") == "tinyclip8m_causal96_v1") &&
           manifest_.at("preprocess") == "rgb_shortest224_center_bilinear_v1" &&
-          manifest_.at("trained") == true && manifest_.at("score_kind") == "uncalibrated_sigmoid", "unsupported critic contract");
+          manifest_.at("trained") == true && manifest_.at("score_kind") == (query_model_ ? "query_logits" : "uncalibrated_sigmoid"), "unsupported critic contract");
   require(logits_.values.size() <= 64, "too many evidence classes");
-  for (const auto &name : {"vision.onnx", "head.onnx", "text.f32"})
+  for (const auto &name : {"vision.onnx", "head.onnx"})
     require(file_hash(bundle / name) == manifest_.at("files").at(name).get<std::string>(), "critic artifact hash mismatch");
+  if (query_model_) {
+    inputs_.pop_back(); // Context/task/query tensors are constants in the exported graph.
+    require(manifest_.at("queries").size() == logits_.values.size(), "query metadata differs from graph");
+    for (std::size_t i = 0; i < logits_.values.size(); ++i) {
+      const auto &query = manifest_.at("queries").at(i);
+      const auto kind = query.value("kind", "failure");
+      require(query.at("id") == manifest_.at("classes").at(i) &&
+          (kind == "failure" || (kind == "recovery_exit" && !query.at("recovery_id").get<std::string>().empty())),
+          "invalid typed query metadata");
+    }
+  } else {
+  require(file_hash(bundle / "text.f32") == manifest_.at("files").at("text.f32").get<std::string>(), "critic text hash mismatch");
   require(fs::file_size(bundle / "text.f32") == 512 * sizeof(float), "invalid text embedding size");
   std::ifstream text(bundle / "text.f32", std::ios::binary);
   text.read(reinterpret_cast<char *>(inputs_.back().values.data()), 512 * sizeof(float));
   require(text.good() && std::all_of(inputs_.back().values.begin(), inputs_.back().values.end(),
           [](float f) { return std::isfinite(f); }), "invalid text embedding");
+  }
   if (backend == "onnx") {
     vision_engine_ = make_onnx(bundle / "vision.onnx", image_, features_);
     head_engine_ = make_onnx(bundle / "head.onnx", inputs_, logits_);
@@ -140,12 +154,20 @@ Json Critic::push(const Frame &f) {
   if (count < static_cast<float>(spec_.min_steps)) { result["status"] = "warming_up"; return result; }
   head_engine_->run(inputs_, logits_);
   result["status"] = "valid";
-  result["score_kind"] = "uncalibrated_sigmoid";
+  result["score_kind"] = query_model_ ? "query_logits" : "uncalibrated_sigmoid";
   for (std::size_t i = 0; i < logits_.values.size(); ++i) {
     const float logit = logits_.values[i];
     require(std::isfinite(logit), "nonfinite critic score");
-    result["scores"][manifest_.at("classes").at(i).get<std::string>()] =
-        1.0 / (1.0 + std::exp(-static_cast<double>(logit)));
+    const auto id = manifest_.at("classes").at(i).get<std::string>();
+    if (query_model_) {
+      const auto &query = manifest_.at("queries").at(i);
+      const auto threshold = manifest_.at("thresholds").value(id, Json::object());
+      const bool calibrated = threshold.value("status", "") == "calibrated";
+      result["scores"][id] = {{"score", logit}, {"kind", query.value("kind", "failure")},
+          {"recovery_id", query.value("recovery_id", "")}, {"probability", nullptr},
+          {"observable", true}, {"threshold_calibrated", calibrated},
+          {"met", calibrated && static_cast<double>(logit) > threshold.at("threshold").get<double>()}};
+    } else result["scores"][id] = 1.0 / (1.0 + std::exp(-static_cast<double>(logit)));
   }
   return result;
 }

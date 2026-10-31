@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include "../../src/tiny_critic/exit_gate.hpp"
 namespace harness::observation {
 struct Detection {
   std::string detector_id, evidence_class;
@@ -45,6 +46,7 @@ struct CriticAdapter {
   virtual bool load(const fs::path &, const Json &, const Json &) = 0;
   virtual std::optional<Detection> evaluate(const Observations &) = 0;
   virtual Json telemetry() const { return nullptr; }
+  virtual Json evaluate_exit(const Observations &, const Json &) { return nullptr; }
 };
 struct ControllerAdapter {
   virtual ~ControllerAdapter() = default;
@@ -74,6 +76,7 @@ struct RecoveryControllerPlaceholder final : ControllerAdapter {
   bool resume() override { return false; }
   bool hold(const std::string &) override { return false; }
 };
+std::unique_ptr<CriticAdapter> make_learned_critic(const fs::path &, const Json &);
 class Runtime {
   const Store &store_;
   CriticAdapter &critic_;
@@ -87,6 +90,9 @@ class Runtime {
   bool last_match_ = false;
   bool authority_requested_ = false;
   std::string proposition_id_;
+  harness::tiny::ExitGate exit_gate_;
+  bool controller_completed_ = false;
+  Ns recovery_started_receipt_ns_ = -1, recovery_epoch_ = -1;
   void validate_authorization(const Json &snapshot) const;
   void record_enforcement(const std::string &outcome, const Json &detail,
                           bool terminal);

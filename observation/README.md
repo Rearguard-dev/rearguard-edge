@@ -21,7 +21,7 @@ template, not a VLM or an inferred recovery policy.
 
 This section is for source validation on a Linux ROS 2 Jazzy development
 machine. It must not be used to deploy a production edge. Production upgrades
-are published with `scripts/export_harness_release.sh`, then installed only via
+are published with `deployops/export_harness_release.sh`, then installed only via
 `rearguard uninstall` and `https://rearguard.dev/install` so the signed release
 manifest, runtime dependencies, cleanup and supervisor lifecycle all follow the
 same path.
@@ -166,7 +166,7 @@ required pre-roll. A detected or operator-reported incident is exported as an
 exact fifteen-second content-addressed window from ten seconds before the mark
 through five seconds after it. Only this incident artifact,
 not the rolling pre-roll, uses the asynchronous verified R2 flow in
-[`docs/r2-recording-pipeline.md`](../../docs/r2-recording-pipeline.md).
+[`strategy/docs/r2-recording-pipeline.md`](../../strategy/docs/r2-recording-pipeline.md).
 `cloud-recordings.json` is a durable per-incident operation journal containing
 attempt counts, local/object paths, grant expiry, state, and the last error.
 Upload stalls cannot block observation, workflow sync, service status

@@ -815,6 +815,8 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
       return s["candidates"][id];
     auto candidate = Json{
         {"id", id}, {"session_id", session}, {"window", w},
+        {"binding_hash", s["binding_hash"]}, {"critic_context", s["critic_context"]},
+        {"capture_profile_revision", s["revision"]},
         {"detection", d}, {"status", "pending_review"},
         {"approved_recovery_match", nullptr}, {"evidence", nullptr}};
     s["candidates"][id] = candidate;

@@ -322,7 +322,7 @@ ROS-enabled release workflow build, test, inspect and publish the exact artifact
 consumed by the installer:
 
 ```bash
-./scripts/export_harness_release.sh 0.4.19
+./deployops/export_harness_release.sh  # shows latest release and prompts for the version
 ```
 
 Do not copy a locally built binary onto an edge computer and do not use

@@ -44,7 +44,7 @@ for name in $MESSAGES; do
   # schemas/gen/ and outside this script itself.
   MATCHES=$(grep -rnE "^\s*(struct|class|interface|type) $name\b" \
     --include='*.cpp' --include='*.hpp' --include='*.h' --include='*.py' --include='*.ts' --include='*.tsx' \
-    backend edge/src edge/include edge/tools sim app/src 2>/dev/null || true)
+    backend edge/src edge/include edge/tools sim frontend/src 2>/dev/null || true)
   while IFS= read -r match; do
     [ -z "$match" ] && continue
     file="${match%%:*}"

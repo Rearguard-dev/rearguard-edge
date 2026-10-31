@@ -9,5 +9,5 @@ __pycache__/
 # and the output carries a hard version assert against that protoc's runtime
 # (the #error block at the top of any .pb.h). Committing it meant every dev
 # box and CI runner with a different protobuf package produced a spurious diff.
-# Generate it instead: `buf generate` here, or scripts/install_harness.sh.
+# Generate it instead: `npm ci && buf generate` here.
 gen/

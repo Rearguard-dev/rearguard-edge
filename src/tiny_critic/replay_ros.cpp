@@ -1,4 +1,6 @@
 #include "critic.hpp"
+#include "worker.hpp"
+#include "runtime.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -19,15 +21,15 @@ namespace {
 using observation::require;
 struct Packet {
   Ns time = 0;
-  std::shared_ptr<rosbag2_storage::SerializedBagMessage> message;
+  std::shared_ptr<const std::vector<std::uint8_t>> bytes;
 };
 template<class T> T decode(const Packet &packet) {
   T output;
-  const auto &raw = *packet.message->serialized_data;
-  rclcpp::SerializedMessage bytes(raw.buffer_length);
+  const auto &raw = *packet.bytes;
+  rclcpp::SerializedMessage bytes(raw.size());
   auto &target = bytes.get_rcl_serialized_message();
-  std::memcpy(target.buffer, raw.buffer, raw.buffer_length);
-  target.buffer_length = raw.buffer_length;
+  std::memcpy(target.buffer, raw.data(), raw.size());
+  target.buffer_length = raw.size();
   rclcpp::Serialization<T> codec;
   codec.deserialize_message(&bytes, &output);
   return output;
@@ -52,12 +54,14 @@ class Canonical {
   std::vector<std::string> camera_names_, joint_names_, topic_order_;
   std::map<std::string, Packet> latest_;
   std::map<std::string, std::pair<Ns,std::vector<float>>> features_;
+  bool client_ = false;
   bool fresh(Ns source, Ns receipt, Ns now) const {
     const auto limit = static_cast<Ns>(critic_.spec().max_age_s * 1e9);
     return receipt <= now && source <= now && now - receipt <= limit && now - source <= limit;
   }
 public:
   Canonical(Critic &critic, Json binding) : critic_(critic), binding_(std::move(binding)) {
+    client_ = critic_.manifest().value("architecture", "") == "multimodal_client_queries_v1";
     joint_names_ = binding_.at("joint_order").get<std::vector<std::string>>();
     require(!joint_names_.empty() && std::set<std::string>(joint_names_.begin(), joint_names_.end()).size() == joint_names_.size(), "invalid joint order");
     std::size_t states = 0, actions = 0, auxiliary = 0;
@@ -87,7 +91,14 @@ public:
     const auto &name = message->topic_name;
     require(topics_.at(name).at("type") == type, "MCAP schema differs from binding");
     require(message->serialized_data->buffer_length <= 64 * 1024 * 1024, "critic packet too large");
-    latest_[name] = {message->recv_timestamp, message};
+    const auto &raw = *message->serialized_data;
+    latest_[name] = {message->recv_timestamp,
+      std::make_shared<const std::vector<std::uint8_t>>(raw.buffer, raw.buffer + raw.buffer_length)};
+  }
+  void receive(const observation::ObservationMessage &message) {
+    require(topics_.at(message.topic).at("type") == message.type && message.cdr &&
+            message.cdr->size() <= 64 * 1024 * 1024, "invalid live critic packet");
+    latest_[message.topic] = {message.receipt_ros_ns, message.cdr};
   }
   Json sample(Ns now, Ns epoch) {
     Frame f(critic_.spec()); f.t_ns = now; f.epoch = epoch; f.valid = true;
@@ -106,7 +117,7 @@ public:
         if (fresh(p.time, p.time, now)) {
           if (role == "camera") {
             const auto image = decode<sensor_msgs::msg::Image>(p);
-            valid = fresh(stamp(image.header.stamp), p.time, now);
+            valid = client_ || fresh(stamp(image.header.stamp), p.time, now);
             if (valid) {
               const auto camera = static_cast<std::size_t>(std::find(camera_names_.begin(), camera_names_.end(), name) - camera_names_.begin());
               auto cached = features_.find(name);
@@ -133,7 +144,7 @@ public:
             }
           } else if (role == "joint_state") {
             auto m = decode<sensor_msgs::msg::JointState>(p);
-            valid = fresh(stamp(m.header.stamp), p.time, now);
+            valid = client_ || fresh(stamp(m.header.stamp), p.time, now);
             if (valid) { state = std::move(m); state_time = p.time; }
           } else if (role == "action") {
             command = decode<std_msgs::msg::Float64MultiArray>(p); command_time = p.time; valid = true;
@@ -186,6 +197,30 @@ public:
         if (!order.contains(joint_names_[i])) continue;
         const auto k = order.at(joint_names_[i]);
         auto *row = f.sensors.data() + i * sensor_size;
+        if (client_) {
+          if (!command) continue; // Invalid step still enters bounded causal history.
+          const auto &meta = critic_.manifest().at("profile").at("joints").at(joint_names_[i]);
+          require(!m.position.empty() && std::isfinite(m.position[k]) && command &&
+                  std::isfinite(command->data[i]), "client critic requires finite position and command");
+          const auto position = [&](double value, float &known) {
+            if (meta.contains("position_lower") && meta.contains("position_upper")) {
+              const double low = meta.at("position_lower"), high = meta.at("position_upper");
+              require(std::isfinite(low) && std::isfinite(high) && high > low, "invalid client limits");
+              known = 1;
+              return static_cast<float>(std::clamp(2 * (value-low)/(high-low)-1, -10.0, 10.0));
+            }
+            return normalize(value, Json::object(), "scale", known);
+          };
+          row[0] = position(m.position[k], row[10]);
+          row[3] = position(command->data[i], row[13]);
+          row[5] = row[8] = 1;
+          row[14] = meta.at("type") == "revolute" ? 1.F/3 : 2.F/3;
+          row[15] = 1.F/3;
+          row[17] = static_cast<float>(static_cast<double>(now-state_time)/(critic_.spec().max_age_s*1e9));
+          row[19] = static_cast<float>(static_cast<double>(now-command_time)/(critic_.spec().max_age_s*1e9));
+          f.joint_mask[i] = 1;
+          continue;
+        }
         const auto meta = all_meta.value(joint_names_[i], Json::object());
         const auto type = meta.value("type", "");
         const std::array<const std::vector<double> *,3> arrays{&m.position, &m.velocity, &m.effort};
@@ -213,6 +248,83 @@ public:
       }
     }
     auto result = critic_.push(f); result["reasons"] = reasons; return result;
+  }
+};
+
+class LearnedAdapter final : public observation::CriticAdapter {
+  Critic critic_;
+  Canonical canonical_;
+  Json binding_, latest_ = nullptr;
+  Ns submitted_ = -1, epoch_ = -1;
+  Ns processed_ = -1, processed_epoch_ = -1;
+  Worker worker_; // Destroy/join before canonical_ and critic_.
+public:
+  LearnedAdapter(const fs::path &bundle, const Json &binding)
+      : critic_(bundle, "onnx"), canonical_(critic_, binding), binding_(binding) {
+    require(critic_.manifest().value("architecture", "") == "multimodal_client_queries_v1",
+            "live query adapter requires client query bundle");
+    require(binding_.at("joint_order") == critic_.manifest().at("profile").at("embodiment").at("joint_names"),
+            "client joint binding differs");
+    std::vector<std::string> cameras;
+    for (const auto &topic : binding_.at("topics"))
+      if (topic.value("role", "") == "camera") cameras.push_back(topic.at("name"));
+    require(cameras.size() == 1 && critic_.manifest().at("profile").at("cameras").at(0).at("name") == cameras[0],
+            "client camera binding differs");
+  }
+  bool ready() const override { return true; }
+  bool load(const fs::path &, const Json &, const Json &) override {
+    return false; // Shadow bundle is never implicit recovery authorization.
+  }
+  Json telemetry() const override { return latest_; }
+  std::optional<observation::Detection> evaluate(const observation::Observations &observations) override {
+    const auto now = observations.receipt_ros_ns;
+    const auto period = static_cast<Ns>(std::llround(1e9 / critic_.spec().sample_hz));
+    if (epoch_ != observations.epoch || now < submitted_) {
+      worker_.reset(); submitted_ = -1; epoch_ = observations.epoch;
+    }
+    if (submitted_ < 0 || now - submitted_ >= period) {
+      std::map<std::string, observation::ObservationMessage> packets;
+      for (const auto &packet : observations.messages)
+        if (canonical_.uses(packet.topic) && packet.receipt_ros_ns <= now)
+          packets[packet.topic] = packet;
+      const auto epoch = observations.epoch;
+      const auto queued = observation::monotonic_ns();
+      worker_.submit([this, packets = std::move(packets), now, epoch, queued] {
+        const auto begin = observation::monotonic_ns();
+        if (processed_epoch_ != epoch || now <= processed_) canonical_.reset();
+        processed_epoch_ = epoch; processed_ = now;
+        for (const auto &[name, packet] : packets) { (void)name; canonical_.receive(packet); }
+        auto result = canonical_.sample(now, epoch);
+        const auto end = observation::monotonic_ns();
+        result.update({{"evaluation_started_monotonic_ns", begin}, {"evaluation_finished_monotonic_ns", end},
+                       {"queue_delay_us", static_cast<double>(begin-queued)/1000.},
+                       {"evaluation_us", static_cast<double>(end-begin)/1000.}});
+        return result;
+      });
+      submitted_ = now;
+    }
+    latest_ = worker_.latest(now, observations.epoch, static_cast<Ns>(critic_.spec().max_age_s*1e9));
+    if (latest_.value("status", "") == "valid") {
+      for (auto it = latest_.at("scores").begin(); it != latest_.at("scores").end(); ++it) {
+        const auto &score = it.value();
+        if (score.value("kind", "") != "failure" || !score.value("met", false)) continue;
+        const auto id = "client-" + critic_.manifest().at("checkpoint_hash").get<std::string>().substr(0, 32);
+        const double proxy = 1. / (1. + std::exp(-score.at("score").get<double>()));
+        observation::Detection detection{id, it.key(), proxy, 10, 5, "experimental_critic", id, false};
+        detection.proposition_id = it.key();
+        return detection; // Reviewable candidate only, never active recovery authority.
+      }
+    }
+    return std::nullopt;
+  }
+  Json evaluate_exit(const observation::Observations &observations, const Json &gate) override {
+    evaluate(observations);
+    const auto id = gate.at("query_id").get<std::string>();
+    if (latest_.value("status", "") != "valid" || !latest_.at("scores").contains(id)) return nullptr;
+    auto score = latest_.at("scores").at(id);
+    score.update({{"query_id", id}, {"t_ns", latest_.at("t_ns")}, {"epoch", latest_.at("epoch")},
+                  {"deployment_validated", false}, {"deployment_id", ""}});
+    return score;
   }
 };
 }
@@ -244,5 +356,11 @@ Json replay_mcap(Critic &critic, const fs::path &path, const Json &binding, std:
   if (last >= 0 && next == last) { out << canonical.sample(next, 0).dump() << '\n'; ++samples; }
   require(samples > 0, "MCAP contains no bound observations");
   return {{"samples", samples}};
+}
+
+} // namespace harness::tiny
+namespace harness::observation {
+std::unique_ptr<CriticAdapter> make_learned_critic(const fs::path &bundle, const Json &binding) {
+  return std::make_unique<harness::tiny::LearnedAdapter>(bundle, binding);
 }
 }

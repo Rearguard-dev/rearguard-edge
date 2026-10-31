@@ -338,6 +338,8 @@ class Observer {
   CriticInferencePlaceholder no_inference_, runtime_critic_;
   CriticAdapter *inference_ = &no_inference_;
   std::unique_ptr<ProfileCritic> profile_critic_;
+  std::unique_ptr<CriticAdapter> learned_critic_;
+  Json learned_context_;
   rclcpp::Node::SharedPtr node_;
   rclcpp::Context::SharedPtr context_;
   std::unique_ptr<RosControllerAuthority> authority_;
@@ -605,6 +607,10 @@ class Observer {
     observations.epoch = evidence_.state["epoch"].get<Ns>();
     observations.receipt_ros_ns = *evidence_.now;
     observations.messages.assign(history_.begin(), history_.end());
+    if (learned_critic_ && store_->snapshot().at("critic_context") != learned_context_) {
+      evidence_.state["critic"] = {{"status", "context_mismatch"}, {"scores", Json::object()}};
+      return;
+    }
     if (fresh)
       if (const auto detection = inference_->evaluate(observations)) {
         try { event("candidate_marked", {{"window", candidate(detection->json())}}); }
@@ -643,6 +649,18 @@ public:
         inference_ = profile_critic_.get();
       }
     }
+    if (options_.values.contains("--critic-bundle")) {
+      require(store_ != nullptr, "learned shadow critic requires --store for setup identity");
+      const auto bundle = options_.path("--critic-bundle");
+      const auto manifest = read_json(bundle / "manifest.json");
+      const auto profile = store_->snapshot();
+      require(manifest.at("profile") == profile.at("critic_context"), "learned critic context differs from profile");
+      require(manifest.at("profile_id") == profile.at("profile_id"), "learned critic belongs to another profile");
+      require(manifest.at("client") == options_.need("--critic-client"), "learned critic client differs");
+      learned_critic_ = make_learned_critic(bundle, config_);
+      learned_context_ = manifest.at("profile");
+      inference_ = learned_critic_.get();
+    }
     rclcpp::NodeOptions node_options;
     node_options.context(context_);
     node_options.parameter_overrides(
@@ -654,7 +672,7 @@ public:
       recovery_executor_ = std::make_unique<RosTrajectoryRecovery>(context_);
       controller_ = std::make_unique<SwitchingRecoveryController>(
           *authority_, *recovery_executor_);
-      runtime_ = std::make_unique<Runtime>(*store_, runtime_critic_, *controller_);
+      runtime_ = std::make_unique<Runtime>(*store_, learned_critic_ ? *learned_critic_ : runtime_critic_, *controller_);
     }
     const auto *rmw = std::getenv("RMW_IMPLEMENTATION");
     Json meta = {{"schema_version", 1},
@@ -703,8 +721,9 @@ public:
     }
     requests_ = node_->create_subscription<String>(
         prefix_ + "/requests", 10, [this](const String &m) { request(m); });
-    if (profile_critic_) {
+    if (profile_critic_ || learned_critic_) {
       double rate = 1;
+      if (learned_critic_) rate = 10;
       for (const auto &head : store_->snapshot()["critic_deployment"]["heads"])
         rate = std::max(rate, head["scope"]["required_hz"].get<double>());
       const auto period = std::chrono::nanoseconds(

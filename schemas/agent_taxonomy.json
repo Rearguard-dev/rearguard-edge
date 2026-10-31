@@ -266,6 +266,22 @@
         "generating": { "opening": "Report the current recovery-generation status and keep the incident artifacts synchronized.", "opening_artifacts": [], "actions": {
           "check_generation": { "description": "Check the recovery generation job and proposal status.", "handler": "check_incident_generation", "artifacts": ["incident_workflow", "recovery_generation"] }
         }},
+        "proposal_review": { "opening": "Present the generated recovery as an unapproved proposal and ask the operator to approve its exact hash for validation or request regeneration with new guidance.", "opening_artifacts": [], "actions": {
+          "approve_recovery_proposal": { "description": "Stage approval of the exact generated proposal for downstream validation; this does not approve, install, or enforce a controller.", "suggested_reply": "Approve this proposal", "next_step": "confirm_proposal", "handler": "stage_confirmation", "artifacts": ["confirmation_required"] },
+          "regenerate_recovery_proposal": { "description": "Ask the operator for replacement recovery guidance before generating another proposal.", "suggested_reply": "Regenerate with guidance", "next_step": "regeneration_guidance", "handler": "state_only", "artifacts": [] },
+          "question": { "description": "Ask about the generated recovery proposal without approving it.", "handler": "state_only", "artifacts": [] }
+        }},
+        "confirm_proposal": { "opening": "Ask for explicit confirmation that the exact generated proposal should advance to validation, while stating that controller approval and enforcement remain blocked.", "opening_artifacts": [], "actions": {
+          "confirm": { "description": "Confirm approval of the exact proposal hash for validation only.", "suggested_reply": "Confirm proposal approval", "next_step": "proposal_approved", "handler": "confirm_pending_action", "artifacts": ["recovery_proposal_review", "missing_confirmation_input"] },
+          "cancel": { "description": "Cancel proposal approval and return to review.", "suggested_reply": "Cancel", "next_step": "proposal_review", "handler": "state_only", "artifacts": [] }
+        }},
+        "regeneration_guidance": { "opening": "Ask what should change in the proposed recovery; the operator must write the replacement guidance in their own words.", "opening_artifacts": [], "actions": {
+          "regeneration_guidance_provided": { "description": "Supersede the current recovery guidance and request a fresh proposal after edge acknowledgement.", "next_step": "generating", "handler": "regenerate_recovery_proposal", "artifacts": ["workflow_command", "incident_workflow"] }
+        }},
+        "proposal_approved": { "opening": "State that the exact proposal was approved for validation only and that controller approval, installation, and enforcement remain blocked until their separate gates pass.", "opening_artifacts": [], "actions": {
+          "regenerate_recovery_proposal": { "description": "Replace the approved-for-validation proposal with new operator guidance.", "suggested_reply": "Regenerate with guidance", "next_step": "regeneration_guidance", "handler": "state_only", "artifacts": [] },
+          "question": { "description": "Ask about the approved-for-validation proposal or remaining gates.", "handler": "state_only", "artifacts": [] }
+        }},
         "automatic_recovery": { "opening": "Explain that a validated critic exceeded the proposition threshold and matched an exact proposition with a linked approved recovery; show the evidence and automatic-match details without requesting approval.", "opening_artifacts": [], "actions": {
           "question": { "description": "Ask about the automatic recovery match or its evidence.", "handler": "state_only", "artifacts": [] }
         }},
@@ -364,6 +380,7 @@
     "collect_incident_guidance": { "kind": "capture", "description": "Store operator recovery guidance for this incident.", "requires": ["input.text"] },
     "advance_incident": { "kind": "mutation", "description": "Accept the captured incident and request recovery generation as edge acknowledgements arrive.", "requires": ["domain.robot_id", "domain.revision"] },
     "check_incident_generation": { "kind": "read", "description": "Read recovery generation status for the reported incident.", "requires": ["domain.snapshot.jobs"] },
+    "regenerate_recovery_proposal": { "kind": "mutation", "description": "Replace recovery guidance through the edge workflow so the prior proposal is superseded and a fresh proposal can be generated.", "requires": ["input.text", "focus.failure_id", "domain.robot_id", "domain.revision"] },
     "show_install_instructions": { "kind": "local", "description": "Return the supported edge installation command.", "requires": [] },
     "show_connect_instructions": { "kind": "local", "description": "Return edge connection and pairing instructions.", "requires": [] },
     "claim_device_pairing": { "kind": "mutation", "description": "Claim a device using an eight-character pairing code.", "requires": ["input.pairing_code", "authorization.user"] },
@@ -418,6 +435,7 @@
     "paired_device": { "label": "Device paired", "renderer": "device", "surface": "context" },
     "profile_events_reconciled": { "label": "Profile updates checked", "renderer": "activity", "surface": "chat" },
     "recovery_bundle": { "label": "Recovery policy selected", "renderer": "detail", "surface": "chat" },
+    "recovery_proposal_review": { "label": "Recovery proposal decision recorded", "renderer": "detail", "surface": "context" },
     "recovery_generation": { "label": "Recovery generation updated", "renderer": "incident", "surface": "context" },
     "recovery_bundles": { "label": "Recovery proposals ready", "renderer": "collection", "surface": "chat" },
     "render_job": { "label": "Preparing render", "renderer": "render_job", "surface": "context" },

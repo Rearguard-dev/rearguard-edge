@@ -53,6 +53,15 @@ Json Runtime::activate() {
               s["binding"], content["contract"]),
           "controller adapter refused deployment");
   contract_ = content["contract"];
+  require(contract_.contains("exit_gate"), "explicit recovery exit gate required");
+  const auto &gate = contract_.at("exit_gate");
+  require(!gate.at("query_id").get<std::string>().empty() &&
+          !gate.at("recovery_id").get<std::string>().empty() &&
+          gate.at("max_age_ms").get<double>() > 0 && gate.at("max_age_ms").get<double>() <= 10000 &&
+          gate.at("persistence_ms").get<double>() >= 0 && gate.at("persistence_ms").get<double>() <= 60000 &&
+          std::isfinite(gate.at("threshold").get<double>()), "invalid recovery exit gate");
+  exit_gate_.reset();
+  controller_completed_ = false;
   deployment_id_ = d["id"];
   failure_id_ = d["failure_id"];
   deployment_content_hash_ = d.value("content_hash", "");
@@ -147,10 +156,28 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
     if (!fresh || !std::isfinite(now))
       return fallback("observations or clock stale");
     if (status == "recovering") {
+      if (observations.epoch != recovery_epoch_)
+        return fallback("recovery clock epoch changed");
       if (now >= deadline_)
         return fallback("recovery timeout");
-      const auto outcome = controller_.poll();
-      if (outcome == "succeeded") {
+      const auto outcome = controller_completed_ ? std::string("succeeded") : controller_.poll();
+      if (outcome == "succeeded") controller_completed_ = true;
+      const auto &gate = contract_.at("exit_gate");
+      const auto judgment = critic_.evaluate_exit(observations, gate);
+      const bool eligible = judgment.is_object() &&
+          judgment.value("kind", "") == "recovery_exit" &&
+          judgment.value("query_id", "") == gate.at("query_id").get<std::string>() &&
+          judgment.value("deployment_id", "") == deployment_id_.get<std::string>() &&
+          judgment.value("deployment_validated", false) && judgment.value("observable", false) &&
+          judgment.value<Ns>("epoch", -1) == observations.epoch &&
+          judgment.value<Ns>("t_ns", -1) >= recovery_started_receipt_ns_ &&
+          judgment.value("recovery_id", "") == gate.at("recovery_id").get<std::string>();
+      const bool exit_met = exit_gate_.update(eligible,
+          eligible ? judgment.at("score").get<double>() : 0, gate.at("threshold").get<double>(),
+          eligible ? judgment.at("t_ns").get<Ns>() : -1, observations.receipt_ros_ns, observations.epoch,
+          static_cast<Ns>(gate.at("max_age_ms").get<double>() * 1e6),
+          static_cast<Ns>(gate.at("persistence_ms").get<double>() * 1e6));
+      if (controller_completed_ && exit_met) {
         if (!controller_.resume())
           return fallback("nominal reentry not acknowledged");
         authority_requested_ = false;
@@ -164,12 +191,16 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
           ++retries_;
           if (controller_.begin()) {
             deadline_ = now + contract_["timeout_ms"].get<double>() / 1000;
+            exit_gate_.reset();
+            controller_completed_ = false;
+            recovery_started_receipt_ns_ = observations.receipt_ros_ns;
+            recovery_epoch_ = observations.epoch;
             return event("recovery_retry");
           }
         }
         return fallback("recovery failed");
       }
-      if (outcome != "running")
+      if (outcome != "running" && outcome != "succeeded")
         return fallback("invalid controller response");
       return nullptr;
     }
@@ -193,6 +224,10 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
       if (!controller_.begin())
         return fallback("recovery authority not acknowledged");
       status = "recovering";
+      exit_gate_.reset();
+      controller_completed_ = false;
+      recovery_started_receipt_ns_ = observations.receipt_ros_ns;
+      recovery_epoch_ = observations.epoch;
       retries_ = 0;
       deadline_ = now + contract_["timeout_ms"].get<double>() / 1000;
       auto result = event("recovery_started");

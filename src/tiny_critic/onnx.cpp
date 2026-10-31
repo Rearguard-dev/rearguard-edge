@@ -15,10 +15,13 @@ class Onnx final : public Engine {
   std::vector<Ort::Value> inputs_, outputs_;
   std::vector<const char *> names_;
   std::array<const char *,1> output_name_;
+  Ort::RunOptions run_options_;
 public:
   Onnx(const fs::path &path, const std::vector<Tensor> &inputs, const Tensor &output)
       : buffers_(inputs), result_(output), output_name_{result_.name.c_str()} {
     options_.SetIntraOpNumThreads(1); options_.SetInterOpNumThreads(1);
+    options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+    options_.EnableMemPattern();
     options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     session_ = Ort::Session(env_, path.c_str(), options_);
     observation::require(session_.GetInputCount() == inputs.size() && session_.GetOutputCount() == 1,
@@ -48,7 +51,7 @@ public:
       observation::require(inputs[i].values.size() == buffers_[i].values.size(), "ONNX input buffer size mismatch");
       std::copy(inputs[i].values.begin(), inputs[i].values.end(), buffers_[i].values.begin());
     }
-    session_.Run(Ort::RunOptions{nullptr}, names_.data(), inputs_.data(), inputs_.size(),
+    session_.Run(run_options_, names_.data(), inputs_.data(), inputs_.size(),
                  output_name_.data(), outputs_.data(), outputs_.size());
     std::copy(result_.values.begin(), result_.values.end(), output.values.begin());
   }

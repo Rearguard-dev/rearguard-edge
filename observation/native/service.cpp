@@ -354,10 +354,15 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
         }
         active_session = service_root() / "sessions" /
                          (std::to_string(wall_ns()) + "-d" + std::to_string(*domain));
-        observer_pid = spawn({executable_path.string(), "observe", "start", "--config",
+        std::vector<std::string> observer_args{executable_path.string(), "observe", "start", "--config",
           config["observation_config"].get<std::string>(), "--session", active_session.string(),
           "--store", store.string(), "--storage", config.value("storage", "mcap"),
-          "--domain-id", std::to_string(*domain), "--wall-timeout", "86400"});
+          "--domain-id", std::to_string(*domain), "--wall-timeout", "86400"};
+        if (config.contains("critic_bundle") && config["critic_bundle"].is_string()) {
+          observer_args.insert(observer_args.end(), {"--critic-bundle", config["critic_bundle"].get<std::string>(),
+              "--critic-client", config.at("critic_client").get<std::string>()});
+        }
+        observer_pid = spawn(observer_args);
         record_event("observer", "started", "success",
                      {{"pid", observer_pid}, {"domain_id", *domain},
                       {"session", active_session.string()}});
@@ -491,8 +496,14 @@ Json stop_service_if_running() {
 Json service_command(const Options &options) {
   if (options.command == "uploader") return run_recording_uploader(options);
   if (options.command == "start") {
-    options.allow("--config --robot-id --domain-id --storage --credentials --backend-url");
+    options.allow("--config --robot-id --domain-id --storage --credentials --backend-url --critic-bundle --critic-client");
     Json changes = Json::object();
+    require(options.values.contains("--critic-bundle") == options.values.contains("--critic-client"),
+            "critic bundle and client must be supplied together");
+    if (options.values.contains("--critic-bundle")) {
+      changes["critic_bundle"] = fs::absolute(options.need("--critic-bundle")).string();
+      changes["critic_client"] = options.need("--critic-client");
+    }
     if (options.values.contains("--config")) changes["observation_config"] = options.need("--config");
     if (options.values.contains("--robot-id")) changes["robot_id"] = options.need("--robot-id");
     if (options.values.contains("--domain-id")) changes["domain_id"] = options.integer("--domain-id", -1);

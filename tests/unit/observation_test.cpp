@@ -102,6 +102,8 @@ struct Fixture {
                      {{"evidence_class", "target_moved"},
                       {"entry_predicate", "target_displaced"},
                       {"completion_predicate", "target_reacquired"},
+                      {"exit_gate", {{"query_id", "target_reacquired"}, {"recovery_id", "reacquire"},
+                                     {"threshold", 0.5}, {"max_age_ms", 100}, {"persistence_ms", 0}}},
                       {"fallback", "hold"},
                       {"controller_id", "so101"},
                       {"confidence_min", 0.7},
@@ -188,6 +190,8 @@ void binding_tests() {
         "only a sampled advancing clock selects simulation time");
 }
 struct FakeCritic final : CriticAdapter {
+  bool exit_observable = true;
+  double exit_score = 1;
   std::optional<Detection> detection = Detection{"tiny", "target_moved", 0.9};
   bool ready() const override { return true; }
   bool load(const fs::path &, const Json &, const Json &) override {
@@ -195,6 +199,13 @@ struct FakeCritic final : CriticAdapter {
   }
   std::optional<Detection> evaluate(const Observations &) override {
     return detection;
+  }
+  Json evaluate_exit(const Observations &observations, const Json &gate) override {
+    return {{"kind", "recovery_exit"}, {"query_id", gate["query_id"]},
+            {"recovery_id", gate["recovery_id"]}, {"deployment_validated", true},
+            {"deployment_id", detection ? Json(detection->deployment_id) : Json("")},
+            {"score", exit_score}, {"observable", exit_observable},
+            {"t_ns", observations.receipt_ros_ns}, {"epoch", observations.epoch}};
   }
 };
 struct FakeController final : ControllerAdapter {
@@ -835,6 +846,13 @@ void runtime_tests() {
   check(started.size() == 1 && started[0]["outcome"] == "unknown",
         "enforcement start is durably queued");
   controller.outcome = "succeeded";
+  critic.exit_observable = false;
+  check(r.step({}, 0.04).is_null() && r.status == "recovering",
+        "controller success with unknown exit evidence cannot resume nominal");
+  critic.exit_observable = true;
+  critic.exit_score = 0;
+  check(r.step({}, 0.06).is_null(), "exit gate must be positively satisfied");
+  critic.exit_score = 1;
   check(r.step({}, 0.1)["kind"] == "recovery_completed",
         "completion acknowledged");
   const auto completed = f.store.pending_enforcements();

@@ -105,7 +105,7 @@ def _load_generated_protobuf():
             f"could not import harness.v1.enforcement_pb2 ({exc}).\n"
             f"Tried: {candidates}\n"
             "Set HARNESS_SCHEMAS_PY to <repo>/schemas/gen/python, and make sure "
-            "'buf generate' has been run (scripts/regen_schemas_and_build_edge.sh)."
+            "'npm ci && buf generate' has been run from the schemas/ directory."
         )
 
 
