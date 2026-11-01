@@ -69,7 +69,7 @@ public:
     std::size_t states = 0, actions = 0, auxiliary = 0;
     for (const auto &topic : binding_.at("topics")) {
       const auto name = topic.at("name").get<std::string>(), role = topic.at("role").get<std::string>(), type = topic.at("type").get<std::string>();
-      if (client_ && role == "camera" && name != critic_.manifest().at("profile").at("cameras").at(0).at("name")) continue;
+      if (client_ && role == "camera" && name != critic_.manifest().at("profile").at("cameras").at(0).at("name").get<std::string>()) continue;
       const bool supported = (role == "camera" && (type == "sensor_msgs/msg/Image" ||
           (type == "sensor_msgs/msg/CompressedImage" && !name.ends_with("/zstd")))) ||
           (role == "joint_state" && type == "sensor_msgs/msg/JointState") ||
