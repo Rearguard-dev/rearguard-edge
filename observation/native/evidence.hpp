@@ -14,7 +14,8 @@ public:
               bool valid = true);
   void check_live(Ns wall = monotonic_ns()) const;
   void expire(Ns wall = monotonic_ns());
-  Json &capture(double before, double after, const std::string &label);
+  Json &capture(double before, double after, const std::string &label,
+                const Json &trigger = nullptr);
   Json promote(const std::string &window, const std::string &description,
                const std::string &actor);
 };

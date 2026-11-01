@@ -487,7 +487,8 @@ class Observer {
                                : data.at("after").get<double>();
         auto &window = evidence_.capture(
             before, after,
-            required_text(data.at("label"), "label").substr(0, 2000));
+            required_text(data.at("label"), "label").substr(0, 2000),
+            data.value("trigger", Json(nullptr)));
         window["capture_request_id"] = key;
         result = window;
       } else if (op == "candidate")

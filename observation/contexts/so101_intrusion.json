@@ -1,0 +1,46 @@
+{
+  "context": {
+    "schema_version": 1,
+    "embodiment": {
+      "class_id": "so101",
+      "joint_names": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper"
+      ],
+      "dof": 6
+    },
+    "task": "Pick white box from yellow mat surface and place it on orange mat surface.",
+    "command_interface": "POSITION",
+    "policy_class": "vla",
+    "joints": {
+      "shoulder_pan": {
+        "type": "revolute"
+      },
+      "shoulder_lift": {
+        "type": "revolute"
+      },
+      "elbow_flex": {
+        "type": "revolute"
+      },
+      "wrist_flex": {
+        "type": "revolute"
+      },
+      "wrist_roll": {
+        "type": "revolute"
+      },
+      "gripper": {
+        "type": "revolute"
+      }
+    },
+    "cameras": [
+      {
+        "name": "/camera/image_raw/compressed",
+        "mount_class": "external"
+      }
+    ]
+  }
+}

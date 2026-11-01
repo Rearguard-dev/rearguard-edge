@@ -315,7 +315,11 @@ if(HARNESS_WITH_TENSORRT)
 endif()
 if(HARNESS_WITH_ROS2)
   find_package(geometry_msgs REQUIRED)
-  target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_ros.cpp)
+  find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h REQUIRED)
+  find_library(TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
+  target_include_directories(harness_tiny_critic SYSTEM PRIVATE ${TURBOJPEG_INCLUDE_DIR})
+  target_link_libraries(harness_tiny_critic PRIVATE ${TURBOJPEG_LIBRARY})
+  target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_ros.cpp src/tiny_critic/jpeg.cpp)
   target_link_libraries(harness_tiny_critic PRIVATE geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
   # ros.cpp calls make_learned_critic(), implemented in replay_ros.cpp. Declare
   # the reverse static-library dependency so CMake repeats the archive cycle
@@ -357,6 +361,12 @@ if(HARNESS_BUILD_TESTS)
     COMMAND ${CMAKE_COMMAND}
       -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/topology_prefix_test.cmake)
+  if(HARNESS_WITH_ROS2)
+    add_executable(harness_jpeg_tests tests/unit/jpeg_test.cpp src/tiny_critic/jpeg.cpp)
+    target_include_directories(harness_jpeg_tests PRIVATE src/tiny_critic ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(harness_jpeg_tests PRIVATE ${TURBOJPEG_LIBRARY} harness_flags)
+    add_test(NAME harness_jpeg_tests COMMAND harness_jpeg_tests)
+  endif()
   if(HARNESS_WITH_ROS2)
     add_executable(harness_observation_ros_tests tests/unit/observation_ros_test.cpp)
     target_link_libraries(harness_observation_ros_tests PRIVATE harness_tiny_critic harness_flags)
@@ -439,6 +449,7 @@ install(TARGETS harness_kernel harness_kernel_static harness_cli harness_critic 
         ARCHIVE DESTINATION lib)
 install(DIRECTORY include/harness DESTINATION include)
 install(FILES runtime/edge-runtime.json DESTINATION share/harness/runtime)
+install(FILES observation/contexts/so101_intrusion.json DESTINATION share/harness/contexts)
 install(PROGRAMS scripts/install_runtime_deps.sh DESTINATION share/harness/install)
 
 if(HARNESS_BUILD_TESTS)

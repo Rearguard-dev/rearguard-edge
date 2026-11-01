@@ -98,7 +98,8 @@ void Evidence::expire(Ns wall) {
             {{"status", "incomplete"},
              {"reason", "ROS clock stopped before post-window completed"}});
 }
-Json &Evidence::capture(double before, double after, const std::string &label) {
+Json &Evidence::capture(double before, double after, const std::string &label,
+                        const Json &trigger) {
   require(now && *now > 0, "ROS clock has not started");
   require(std::isfinite(before) && std::isfinite(after) && before > 0 &&
               before <= 20 && after >= 0 && after <= 20,
@@ -108,17 +109,45 @@ Json &Evidence::capture(double before, double after, const std::string &label) {
     if (w["status"] == "collecting")
       ++collecting;
   require(collecting < 8, "at most eight windows may collect concurrently");
+  Ns mark = *now;
+  if (!trigger.is_null()) {
+    require(config.value("clock", "") == "ros_system",
+            "UI click anchoring requires ROS system time, not simulation time");
+    const auto current_wall = wall_ns();
+    require(std::abs(*now - current_wall) <= 100000000LL,
+            "observer system clock is not aligned with edge wall time");
+    require(trigger.value("source", "") == "ui_click", "invalid UI trigger source");
+    const auto uncertainty = trigger.at("total_clock_uncertainty_ms").get<double>();
+    require(std::isfinite(uncertainty) && uncertainty >= 0 && uncertainty <= 500,
+            "incident clock uncertainty exceeds 500 ms");
+    mark = std::stoll(trigger.at("edge_trigger_wall_ns").get<std::string>());
+    require(mark >= *now - 10000000000LL && mark <= *now + static_cast<Ns>(uncertainty * 1e6),
+            "click timestamp expired before reaching the observer");
+    const auto start = mark - static_cast<Ns>(before * 1e9);
+    for (const auto &group : required_topic_groups(config)) {
+      bool retained = false;
+      for (const auto &topic : group) {
+        const auto &history = samples.at(topic);
+        if (!history.empty() && history.front().at("receipt_ros_ns").get<Ns>() <= start)
+          retained = true;
+      }
+      require(retained, "click pre-roll is unavailable for " + group.front() + "; let the observer run before reporting again");
+    }
+  }
   state["windows"].push_back(
       {{"id", "w-" + unique_id().substr(0, 12)},
        {"epoch", state["epoch"]},
-       {"start_ns", std::max<Ns>(0, *now - static_cast<Ns>(before * 1e9))},
-       {"mark_ns", *now},
-       {"end_ns", *now + static_cast<Ns>(after * 1e9)},
+       {"start_ns", std::max<Ns>(0, mark - static_cast<Ns>(before * 1e9))},
+       {"mark_ns", mark},
+       {"end_ns", mark + static_cast<Ns>(after * 1e9)},
        {"label", label},
        {"status", "collecting"},
        {"trigger", "operator_mark"},
        {"evidence", "rosbag2"},
        {"clock", config["clock"]}});
+  if (!trigger.is_null()) state["windows"].back()["trigger_timing"] = trigger;
+  // A delayed request may arrive after its complete post-roll is buffered.
+  tick(*now);
   return state["windows"].back();
 }
 Json Evidence::promote(const std::string &id, const std::string &description,

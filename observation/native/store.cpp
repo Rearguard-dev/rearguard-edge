@@ -67,7 +67,9 @@ public:
 Json snapshot(Database &db) {
   Statement q(db, "SELECT body FROM profile WHERE id=1");
   require(q.next(), "profile missing");
-  return Json::parse(q.text(0));
+  auto value = Json::parse(q.text(0));
+  value["capabilities"]["incident_click_v1"] = true;
+  return value;
 }
 const std::map<std::string, std::string> artifacts = {
     {"demonstration", "demonstration_mcap"},

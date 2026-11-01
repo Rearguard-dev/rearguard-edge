@@ -18,7 +18,7 @@ have_runtime() {
       ros-jazzy-control-msgs ros-jazzy-controller-manager-msgs \
       ros-jazzy-sensor-msgs ros-jazzy-std-msgs \
       ros-jazzy-trajectory-msgs ros-jazzy-geometry-msgs \
-      ros-jazzy-rosgraph-msgs ros-jazzy-rmw-cyclonedds-cpp
+      ros-jazzy-rosgraph-msgs ros-jazzy-rmw-cyclonedds-cpp libturbojpeg0
     do
       dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$' || return 1
     done
@@ -66,6 +66,7 @@ sudo apt-get install -y \
   ros-jazzy-trajectory-msgs \
   ros-jazzy-geometry-msgs \
   ros-jazzy-rosgraph-msgs \
-  ros-jazzy-rmw-cyclonedds-cpp
+  ros-jazzy-rmw-cyclonedds-cpp \
+  libturbojpeg0
 
 have_runtime || die "ROS installation completed without the MCAP storage plugin"

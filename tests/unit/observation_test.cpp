@@ -244,6 +244,51 @@ struct FakeWorkflowTransport final : WorkflowTransport {
     enforcement_uploads.push_back({{"robot_id", robot_id}, {"records", records}});
   }
 };
+void incident_timing_tests() {
+  // Browser and edge wall clocks deliberately differ from the server by 30 s.
+  const Ns server = 1800000000000000000LL, local = server + 30000000000LL;
+  Json command = {{"payload", {{"trigger", {{"source", "ui_click"},
+      {"server_trigger_ms", static_cast<double>(server - 2000000000LL) / 1e6},
+      {"clock_uncertainty_ms", 10}}}}},
+      {"_server_clock", {{"received_ns", std::to_string(server + 40000000)},
+                         {"sent_ns", std::to_string(server + 60000000)}}}};
+  const auto aligned = align_incident_trigger(command, local, local + 100000000, 100000000);
+  check(std::stoll(aligned.at("edge_trigger_wall_ns").get<std::string>()) == local - 2000000000LL,
+        "click time mapped across a 30 second wall-clock offset");
+  check(aligned.at("total_clock_uncertainty_ms") == 52,
+        "browser and edge network uncertainty retained");
+  rejects([&] { align_incident_trigger(command, local, local + 200000000, 100000000); }, "clock changed");
+  rejects([&] { align_incident_trigger(command, local, local + 2000000000LL, 2000000000LL); }, "uncertainty");
+  auto stale = command;
+  stale["payload"]["trigger"]["server_trigger_ms"] = static_cast<double>(server - 20000000000LL)/1e6;
+  rejects([&] { align_incident_trigger(stale, local, local + 100000000, 100000000); }, "expired");
+
+  Fixture f;
+  auto binding = f.binding; binding["clock"] = "ros_system";
+  Evidence e(binding, "timed");
+  const auto now = wall_ns();
+  for (const auto &topic : binding.at("topics")) {
+    const auto name = topic.at("name").get<std::string>();
+    e.sample(name, now - 20000000000LL, nullptr, 1);
+    e.sample(name, now - 1000000000LL, nullptr, 2);
+  }
+  e.tick(now);
+  auto trigger = aligned;
+  trigger["edge_trigger_wall_ns"] = std::to_string(now - 2000000000LL);
+  auto window = e.capture(10, 5, "delayed click", trigger);
+  check(window.at("mark_ns") == now - 2000000000LL && window.at("start_ns") == now - 12000000000LL,
+        "delivery delay does not shift click mark or pre-roll");
+  check(window.at("trigger_timing") == trigger, "timing provenance persists");
+  trigger["edge_trigger_wall_ns"] = std::to_string(now - 6000000000LL);
+  check(e.capture(10, 5, "already buffered", trigger).at("status") == "ready",
+        "delayed click can complete from buffered post-roll");
+  Evidence missing(binding, "missing"); missing.tick(wall_ns());
+  rejects([&] { missing.capture(10, 5, "missing pre-roll", trigger); }, "pre-roll");
+  binding["clock"] = "ros_sim";
+  Evidence simulated(binding, "sim"); simulated.tick(now);
+  rejects([&] { simulated.capture(10, 5, "sim", trigger); }, "system time");
+}
+
 void evidence_tests() {
   const auto config = load_config(HARNESS_OBSERVATION_CONFIG);
   Evidence e(config, "test");
@@ -914,6 +959,7 @@ int main() {
         "SHA256 known vector");
     binding_tests();
     evidence_tests();
+    incident_timing_tests();
     workflow_tests();
     handover_tests();
     authorization_tests();

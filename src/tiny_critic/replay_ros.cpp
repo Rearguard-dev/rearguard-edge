@@ -1,5 +1,6 @@
 #include "critic.hpp"
 #include "worker.hpp"
+#include "jpeg.hpp"
 #include "runtime.hpp"
 #include <algorithm>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <rclcpp/serialization.hpp>
 #include <rosbag2_cpp/reader.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <set>
@@ -67,7 +69,9 @@ public:
     std::size_t states = 0, actions = 0, auxiliary = 0;
     for (const auto &topic : binding_.at("topics")) {
       const auto name = topic.at("name").get<std::string>(), role = topic.at("role").get<std::string>(), type = topic.at("type").get<std::string>();
-      const bool supported = (role == "camera" && type == "sensor_msgs/msg/Image") ||
+      if (client_ && role == "camera" && name != critic_.manifest().at("profile").at("cameras").at(0).at("name")) continue;
+      const bool supported = (role == "camera" && (type == "sensor_msgs/msg/Image" ||
+          (type == "sensor_msgs/msg/CompressedImage" && !name.ends_with("/zstd")))) ||
           (role == "joint_state" && type == "sensor_msgs/msg/JointState") ||
           (role == "action" && type == "std_msgs/msg/Float64MultiArray") ||
           (role == "imu" && type == "sensor_msgs/msg/Imu") ||
@@ -116,24 +120,36 @@ public:
         const auto &p = found->second;
         if (fresh(p.time, p.time, now)) {
           if (role == "camera") {
-            const auto image = decode<sensor_msgs::msg::Image>(p);
-            valid = client_ || fresh(stamp(image.header.stamp), p.time, now);
+            const bool compressed = topic.at("type") == "sensor_msgs/msg/CompressedImage";
+            const auto image = compressed ? sensor_msgs::msg::Image{} : decode<sensor_msgs::msg::Image>(p);
+            valid = client_ || (compressed
+                ? fresh(stamp(decode<sensor_msgs::msg::CompressedImage>(p).header.stamp), p.time, now)
+                : fresh(stamp(image.header.stamp), p.time, now));
             if (valid) {
               const auto camera = static_cast<std::size_t>(std::find(camera_names_.begin(), camera_names_.end(), name) - camera_names_.begin());
               auto cached = features_.find(name);
               if (cached == features_.end() || cached->second.first != p.time) {
-                const auto w = static_cast<std::size_t>(image.width), h = static_cast<std::size_t>(image.height);
-                const auto channels = image.encoding == "mono8" ? 1U :
-                    (image.encoding == "rgb8" || image.encoding == "bgr8") ? 3U :
-                    (image.encoding == "rgba8" || image.encoding == "bgra8") ? 4U : 0U;
-                require(w > 0 && h > 0 && w <= 16384 && h <= 16384 && w * h <= 16777216 && channels != 0 &&
-                    image.step >= w * channels && image.data.size() == h * image.step, "invalid camera bytes/encoding");
-                std::vector<std::uint8_t> rgb(w * h * 3);
-                const bool bgr = image.encoding == "bgr8" || image.encoding == "bgra8";
-                for (std::size_t y = 0; y < h; ++y)
-                  for (std::size_t x = 0; x < w; ++x)
-                    for (std::size_t c = 0; c < 3; ++c)
-                      rgb[(y * w + x) * 3 + c] = image.data[y * image.step + x * channels + (channels == 1 ? 0 : bgr ? 2 - c : c)];
+                RgbImage decoded_image;
+                if (compressed) {
+                  const auto message = decode<sensor_msgs::msg::CompressedImage>(p);
+                  decoded_image = decode_jpeg(message.data);
+                } else {
+                  const auto w = static_cast<std::size_t>(image.width), h = static_cast<std::size_t>(image.height);
+                  const auto channels = image.encoding == "mono8" ? 1U :
+                      (image.encoding == "rgb8" || image.encoding == "bgr8") ? 3U :
+                      (image.encoding == "rgba8" || image.encoding == "bgra8") ? 4U : 0U;
+                  require(w > 0 && h > 0 && w <= 16384 && h <= 16384 && w * h <= 16777216 && channels != 0 &&
+                      image.step >= w * channels && image.data.size() == h * image.step, "invalid camera bytes/encoding");
+                  std::vector<std::uint8_t> rgb(w * h * 3);
+                  const bool bgr = image.encoding == "bgr8" || image.encoding == "bgra8";
+                  for (std::size_t y = 0; y < h; ++y)
+                    for (std::size_t x = 0; x < w; ++x)
+                      for (std::size_t c = 0; c < 3; ++c)
+                        rgb[(y * w + x) * 3 + c] = image.data[y * image.step + x * channels + (channels == 1 ? 0 : bgr ? 2 - c : c)];
+                  decoded_image = {w, h, std::move(rgb)};
+                }
+                const auto w = decoded_image.width, h = decoded_image.height;
+                const auto &rgb = decoded_image.pixels;
                 std::vector<float> values(feature_size);
                 critic_.encode(rgb, w, h, w * 3, values);
                 features_[name] = {p.time, std::move(values)};
@@ -267,7 +283,7 @@ public:
             "client joint binding differs");
     std::vector<std::string> cameras;
     for (const auto &topic : binding_.at("topics"))
-      if (topic.value("role", "") == "camera") cameras.push_back(topic.at("name"));
+      if (topic.value("role", "") == "camera" && topic.at("name") == critic_.manifest().at("profile").at("cameras").at(0).at("name")) cameras.push_back(topic.at("name"));
     require(cameras.size() == 1 && critic_.manifest().at("profile").at("cameras").at(0).at("name") == cameras[0],
             "client camera binding differs");
   }

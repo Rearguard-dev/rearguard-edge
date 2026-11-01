@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <regex>
@@ -80,8 +81,19 @@ public:
     curl_free(profile);
     curl_free(device);
     curl_easy_cleanup(curl);
+    const auto started_wall = wall_ns(), started_mono = monotonic_ns();
     auto result = request("GET", path, nullptr);
+    const auto ended_wall = wall_ns(), elapsed = monotonic_ns() - started_mono;
     require(result.is_array(), "backend returned a non-array command queue");
+    for (auto &command : result) {
+      if (command.value("operation", "") != "report_incident" ||
+          !command.at("payload").contains("trigger")) continue;
+      try {
+        command["_aligned_trigger"] = align_incident_trigger(command, started_wall, ended_wall, elapsed);
+      } catch (const std::exception &error) {
+        command["_trigger_error"] = error.what();
+      }
+    }
     return result;
   }
 
@@ -166,6 +178,39 @@ private:
 
 } // namespace
 
+Json align_incident_trigger(const Json &command, Ns started_wall, Ns ended_wall,
+                            Ns elapsed_monotonic) {
+  require(std::abs((ended_wall - started_wall) - elapsed_monotonic) <= 10000000LL,
+          "edge wall clock changed during trigger alignment; retry capture");
+  const auto &clock = command.at("_server_clock");
+  const Ns received = std::stoll(clock.at("received_ns").get<std::string>());
+  const Ns sent = std::stoll(clock.at("sent_ns").get<std::string>());
+  const auto processing = sent - received;
+  require(processing >= 0 && elapsed_monotonic >= processing - 2000000LL,
+          "invalid server clock sample");
+  auto trigger = command.at("payload").at("trigger");
+  require(trigger.value("source", "") == "ui_click", "unsupported incident trigger");
+  const auto click_ms = trigger.at("server_trigger_ms").get<double>();
+  const auto browser_uncertainty = trigger.at("clock_uncertainty_ms").get<double>();
+  require(std::isfinite(click_ms) && std::isfinite(browser_uncertainty) &&
+              browser_uncertainty >= 0 && browser_uncertainty <= 250,
+          "invalid browser trigger clock");
+  const auto uncertainty = browser_uncertainty +
+      static_cast<double>(std::max<Ns>(0, elapsed_monotonic - processing)) / 2000000.0 + 2;
+  require(uncertainty <= 500, "incident clock uncertainty exceeds 500 ms; retry capture");
+  require(click_ms > static_cast<double>(received) / 1e6 - 10000 &&
+              click_ms <= static_cast<double>(sent) / 1e6 + browser_uncertainty,
+          "incident trigger expired or is in the future");
+  const auto local_midpoint = started_wall + (ended_wall - started_wall) / 2;
+  const auto server_midpoint = received + (sent - received) / 2;
+  const Ns mark = static_cast<Ns>(std::llround(click_ms * 1e6)) + local_midpoint - server_midpoint;
+  trigger["edge_trigger_wall_ns"] = std::to_string(mark);
+  trigger["edge_received_wall_ns"] = std::to_string(ended_wall);
+  trigger["total_clock_uncertainty_ms"] = uncertainty;
+  trigger["server_to_edge_offset_ns"] = std::to_string(local_midpoint - server_midpoint);
+  return trigger;
+}
+
 WorkflowConnector::WorkflowConnector(Store store, std::string robot_id,
                                      WorkflowTransport &transport,
                                      IncidentCapture incident_capture)
@@ -201,6 +246,9 @@ Json WorkflowConnector::cycle(bool heartbeat) {
         continue;
       auto applied = command;
       try {
+        require(!command.contains("_trigger_error"), command.value("_trigger_error", "trigger alignment failed"));
+        require(!command.at("payload").contains("trigger") || command.contains("_aligned_trigger"),
+                "click-anchored capture requires an upgraded edge connector");
         require(static_cast<bool>(incident_capture_),
                 "incident capture requires the active edge observer");
         applied["payload"]["window"] = incident_capture_(command);
@@ -300,12 +348,11 @@ Json run_workflow_sync(const Options &options, bool once) {
     for (const auto &window : observation.value("windows", Json::array()))
       if (window.value("capture_request_id", "") == capture_request_id)
         return window;
-    return ros_request_payload(
-        {{"schema_version", 1},
-         {"request_id", capture_request_id},
-         {"operation", "incident_capture"},
-         {"label", required_text(payload.at("label"), "label")}},
-        meta);
+    Json request = {{"schema_version", 1}, {"request_id", capture_request_id},
+                    {"operation", "incident_capture"},
+                    {"label", required_text(payload.at("label"), "label")}};
+    if (command.contains("_aligned_trigger")) request["trigger"] = command.at("_aligned_trigger");
+    return ros_request_payload(request, meta);
   };
   WorkflowConnector connector(Store(options.path("--store")),
                               options.need("--robot-id"), transport,

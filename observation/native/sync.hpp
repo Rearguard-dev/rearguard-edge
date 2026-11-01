@@ -37,6 +37,9 @@ private:
   Ns last_upload_monotonic_ns_ = 0;
 };
 
+Json align_incident_trigger(const Json &command, Ns started_wall, Ns ended_wall,
+                            Ns elapsed_monotonic);
+
 DeviceCredentials load_device_credentials(const fs::path &path,
                                           const std::string &backend_override);
 Json fetch_device_assignment(const DeviceCredentials &credentials);
