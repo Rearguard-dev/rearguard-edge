@@ -246,6 +246,8 @@ Json WorkflowConnector::cycle(bool heartbeat) {
         continue;
       auto applied = command;
       try {
+        require(command.at("expected_revision") == store_.snapshot().at("revision"),
+                "profile revision changed before incident capture");
         require(!command.contains("_trigger_error"), command.value("_trigger_error", "trigger alignment failed"));
         require(!command.at("payload").contains("trigger") || command.contains("_aligned_trigger"),
                 "click-anchored capture requires an upgraded edge connector");
@@ -352,6 +354,7 @@ Json run_workflow_sync(const Options &options, bool once) {
                     {"operation", "incident_capture"},
                     {"label", required_text(payload.at("label"), "label")}};
     if (command.contains("_aligned_trigger")) request["trigger"] = command.at("_aligned_trigger");
+    if (payload.contains("capture_context")) request["capture_context"] = payload.at("capture_context");
     return ros_request_payload(request, meta);
   };
   WorkflowConnector connector(Store(options.path("--store")),

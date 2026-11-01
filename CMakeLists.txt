@@ -231,7 +231,7 @@ option(HARNESS_WITH_ROS2 "Build native ROS 2 observation and MCAP export (source
 add_library(harness_observation STATIC
   observation/native/common.cpp observation/native/store.cpp
   observation/native/binding.cpp
-  observation/native/evidence.cpp observation/native/runtime.cpp observation/native/sync.cpp
+  observation/native/evidence.cpp observation/native/capture_context.cpp observation/native/runtime.cpp observation/native/sync.cpp
   observation/native/recording_upload.cpp
   observation/native/events.cpp observation/native/service.cpp
   observation/native/commands.cpp)

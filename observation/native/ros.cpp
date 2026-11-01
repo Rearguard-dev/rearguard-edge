@@ -1,3 +1,4 @@
+#include "capture_context.hpp"
 #include "common.hpp"
 #include "critic_features.hpp"
 #include "evidence.hpp"
@@ -446,7 +447,9 @@ class Observer {
     auto canonical_detection = detection;
     canonical_detection["before_s"] = 10.0;
     canonical_detection["after_s"] = 5.0;
+    const auto capture_context = freeze_capture_context(store_->snapshot());
     auto &w = evidence_.capture(10.0, 5.0, detection.at("evidence_class"));
+    w["capture_context"] = capture_context;
     w.update({{"trigger", "critic_candidate"}, {"detection", canonical_detection}});
     detection_marks_[key] = *evidence_.now;
     return w;
@@ -455,7 +458,7 @@ class Observer {
     Json id = nullptr, response;
     std::string hash;
     try {
-      require(message.data.size() <= 16384, "request too large");
+      require(message.data.size() <= 262144, "request too large");
       const auto data = Json::parse(message.data);
       require(data.is_object() && data.value("schema_version", 0) == 1,
               "request requires schema_version 1");
@@ -485,10 +488,16 @@ class Observer {
         const auto after = op == "incident_capture"
                                ? 5.0
                                : data.at("after").get<double>();
+        const auto capture_context = store_
+            ? freeze_capture_context(store_->snapshot(), data.value("capture_context", Json(nullptr)))
+            : Json{{"schema_version", 1}, {"status", "partial"},
+                   {"missing_fields", Json::array({"profile"})}, {"binding_hash", digest(config_)},
+                   {"binding", config_}, {"critic_context", nullptr}};
         auto &window = evidence_.capture(
             before, after,
             required_text(data.at("label"), "label").substr(0, 2000),
             data.value("trigger", Json(nullptr)));
+        window["capture_context"] = capture_context;
         window["capture_request_id"] = key;
         result = window;
       } else if (op == "candidate")

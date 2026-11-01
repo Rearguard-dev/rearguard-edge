@@ -230,7 +230,10 @@ public:
           row[0] = position(m.position[k], row[10]);
           row[3] = position(command->data[i], row[13]);
           row[5] = row[8] = 1;
-          row[14] = meta.at("type") == "revolute" ? 1.F/3 : 2.F/3;
+          const auto joint_type = meta.value("type", "");
+          require(joint_type.empty() || joint_type == "revolute" || joint_type == "prismatic",
+                  "unsupported declared client joint type");
+          row[14] = joint_type == "revolute" ? 1.F/3 : joint_type == "prismatic" ? 2.F/3 : 0.F;
           row[15] = 1.F/3;
           row[17] = static_cast<float>(static_cast<double>(now-state_time)/(critic_.spec().max_age_s*1e9));
           row[19] = static_cast<float>(static_cast<double>(now-command_time)/(critic_.spec().max_age_s*1e9));

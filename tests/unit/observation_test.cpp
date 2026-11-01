@@ -1,4 +1,5 @@
 #include "evidence.hpp"
+#include "capture_context.hpp"
 #include "binding.hpp"
 #include "events.hpp"
 #include "runtime.hpp"
@@ -244,6 +245,44 @@ struct FakeWorkflowTransport final : WorkflowTransport {
     enforcement_uploads.push_back({{"robot_id", robot_id}, {"records", records}});
   }
 };
+void capture_context_tests() {
+  Fixture f;
+  auto snapshot = f.store.snapshot();
+  const auto &binding = snapshot.at("binding");
+  std::string camera;
+  for (const auto &topic : binding.at("topics"))
+    if (topic.value("role", "") == "camera") { camera = topic.at("name").get<std::string>(); break; }
+  Json context = {{"schema_version", 1}, {"task", "Pick and place"},
+      {"embodiment", {{"class_id", "so101"}, {"joint_names", binding.at("joint_order")}}},
+      {"command_interface", "POSITION"}, {"cameras", Json::array({{{"name", camera}}})}};
+  Json configured = {{"schema_version", 1}, {"profile_id", snapshot.at("profile_id")},
+      {"profile_revision", snapshot.at("revision")}, {"binding_hash", snapshot.at("binding_hash")},
+      {"configuration_revision", 7}, {"status", "complete"}, {"critic_context", context}};
+  const auto frozen = freeze_capture_context(snapshot, configured);
+  check(frozen.at("critic_context") == context && frozen.contains("capture_hash"),
+        "configured context freezes without activating a model");
+  check(f.store.snapshot().at("critic_context").is_null(), "capture metadata does not change inference context");
+  configured["binding_hash"] = "wrong";
+  rejects([&] { freeze_capture_context(snapshot, configured); }, "binding mismatch");
+  configured["binding_hash"] = snapshot.at("binding_hash");
+  configured["profile_revision"] = 999;
+  rejects([&] { freeze_capture_context(snapshot, configured); }, "revision changed");
+  check(freeze_capture_context(snapshot).at("status") == "partial", "missing context is explicit, raw evidence retained");
+
+  Json coverage = Json::object();
+  for (const auto &topic : binding.at("topics")) coverage[topic.at("name").get<std::string>()] = {{"valid_count", 5}};
+  Json window = {{"id", "context-test"}, {"epoch", 0}, {"start_ns", 1}, {"mark_ns", 11},
+      {"end_ns", 16}, {"status", "ready"}, {"coverage", coverage}, {"capture_context", frozen}};
+  // Later profile edits must not relabel a captured window.
+  f.apply("set_critic_context", {{"context", {{"schema_version", 1}, {"task", "Later task"},
+      {"embodiment", {{"class_id", "so101"}, {"joint_names", binding.at("joint_order")}}}}}});
+  const auto candidate = f.apply("candidate", {{"window", window}, {"session_id", "session"},
+      {"binding_hash", snapshot.at("binding_hash")},
+      {"detection", {{"detector_id", "operator"}, {"evidence_class", "hand"}, {"source", "operator_mark"}, {"confidence", 1.0}}}});
+  check(candidate.at("critic_context") == context, "candidate uses trigger-time context, not later profile edits");
+  check(candidate.at("capture_profile_revision") == snapshot.at("revision"), "capture revision stays frozen");
+}
+
 void incident_timing_tests() {
   // Browser and edge wall clocks deliberately differ from the server by 30 s.
   const Ns server = 1800000000000000000LL, local = server + 30000000000LL;
@@ -960,6 +999,7 @@ int main() {
     binding_tests();
     evidence_tests();
     incident_timing_tests();
+    capture_context_tests();
     workflow_tests();
     handover_tests();
     authorization_tests();

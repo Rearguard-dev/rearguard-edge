@@ -69,6 +69,7 @@ Json snapshot(Database &db) {
   require(q.next(), "profile missing");
   auto value = Json::parse(q.text(0));
   value["capabilities"]["incident_click_v1"] = true;
+  value["capabilities"]["capture_context_v1"] = true;
   return value;
 }
 const std::map<std::string, std::string> artifacts = {
@@ -815,10 +816,19 @@ Json Store::transition(Json &s, const std::string &op, const Json &p,
         digest(Json::array({session, w.at("epoch"), w.at("id")})).substr(0, 24);
     if (s["candidates"].contains(id))
       return s["candidates"][id];
+    const auto captured = w.value("capture_context", Json(nullptr));
+    if (captured.is_object()) {
+      require(captured.at("binding_hash") == s.at("binding_hash"), "captured context binding differs from candidate");
+      auto canonical_capture = captured;
+      canonical_capture.erase("capture_hash");
+      require(captured.at("capture_hash") == digest(canonical_capture), "captured context integrity mismatch");
+    }
     auto candidate = Json{
         {"id", id}, {"session_id", session}, {"window", w},
-        {"binding_hash", s["binding_hash"]}, {"critic_context", s["critic_context"]},
-        {"capture_profile_revision", s["revision"]},
+        {"binding_hash", s["binding_hash"]},
+        {"critic_context", captured.is_object() ? captured.value("critic_context", Json(nullptr)) : s["critic_context"]},
+        {"capture_context", captured},
+        {"capture_profile_revision", captured.is_object() ? captured.at("profile_revision") : s["revision"]},
         {"detection", d}, {"status", "pending_review"},
         {"approved_recovery_match", nullptr}, {"evidence", nullptr}};
     s["candidates"][id] = candidate;
