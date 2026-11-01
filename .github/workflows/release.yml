@@ -52,7 +52,7 @@ jobs:
           ros-jazzy-controller-manager-msgs
           ros-jazzy-sensor-msgs ros-jazzy-std-msgs
           ros-jazzy-trajectory-msgs ros-jazzy-geometry-msgs
-          ros-jazzy-rosgraph-msgs
+          ros-jazzy-rosgraph-msgs ros-jazzy-rmw-cyclonedds-cpp
 
       - name: Generate C++ schemas
         working-directory: schemas
@@ -107,6 +107,7 @@ jobs:
           mkdir -p "${extracted}"
           tar -xzf "${artifact}" -C "${extracted}"
           installed="${extracted}/${package_root}"
+          "${installed}/share/harness/install/install_runtime_deps.sh" --check
           test -f "${installed}/share/harness/install/install.sh"
           "${installed}/bin/rearguard" update --help
           test "$("${installed}/bin/rearguard" --version)" = "rearguard ${GITHUB_REF_NAME#v}"
