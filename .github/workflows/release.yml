@@ -88,14 +88,18 @@ jobs:
           artifact="dist/harness-kernel-${GITHUB_REF_NAME#v}-x86_64-linux-gnu.tar.gz"
           test -f "${artifact}"
           package_root="harness-kernel-${GITHUB_REF_NAME#v}"
-          tar -tzf "${artifact}" | grep -q "${package_root}/bin/rearguard$"
-          tar -tzf "${artifact}" | grep -q "${package_root}/bin/harness_critic$"
-          tar -tzf "${artifact}" | grep -q "${package_root}/lib/libharness_kernel.so"
-          tar -tzf "${artifact}" | grep -q "${package_root}/lib/libthreshold_critic.so"
-          tar -tzf "${artifact}" | grep -q "${package_root}/lib/libstall_critic.so"
-          tar -tzf "${artifact}" | grep -q '/share/harness/runtime/edge-runtime.json$'
-          tar -tzf "${artifact}" | grep -q '/share/harness/install/install_runtime_deps.sh$'
-          if tar -tzf "${artifact}" | grep -q '/share/harness/observation/'; then
+          # grep -q can close a pipeline early, making tar fail with SIGPIPE
+          # under Actions' pipefail. Validate/list the archive once, then search.
+          package_listing="${RUNNER_TEMP}/harness-package-listing.txt"
+          tar -tzf "${artifact}" >"${package_listing}"
+          grep -Fxq "${package_root}/bin/rearguard" "${package_listing}"
+          grep -Fxq "${package_root}/bin/harness_critic" "${package_listing}"
+          grep -Fxq "${package_root}/lib/libharness_kernel.so" "${package_listing}"
+          grep -Fxq "${package_root}/lib/libthreshold_critic.so" "${package_listing}"
+          grep -Fxq "${package_root}/lib/libstall_critic.so" "${package_listing}"
+          grep -Fxq "${package_root}/share/harness/runtime/edge-runtime.json" "${package_listing}"
+          grep -Fxq "${package_root}/share/harness/install/install_runtime_deps.sh" "${package_listing}"
+          if grep -q '/share/harness/observation/' "${package_listing}"; then
             echo "::error::release must not package embodiment-specific observation presets"
             exit 1
           fi
@@ -110,9 +114,11 @@ jobs:
             echo "::error::harness_critic unexpectedly accepted an empty command"
             exit 1
           fi
-          grep -q 'harness_critic <inspect|seal-engines|score|replay|encode>' "${critic_usage}"
+          grep -Fq 'harness_critic <inspect|seal-engines|score|replay|encode|benchmark>' "${critic_usage}"
           for executable in rearguard harness_critic; do
-            if ldd "${installed}/bin/${executable}" | grep -q 'not found'; then
+            dependencies="${RUNNER_TEMP}/${executable}-dependencies.txt"
+            ldd "${installed}/bin/${executable}" >"${dependencies}"
+            if grep -q 'not found' "${dependencies}"; then
               echo "::error::packaged ${executable} has unresolved shared libraries"
               exit 1
             fi
