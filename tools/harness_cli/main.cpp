@@ -27,6 +27,7 @@
 #include "replay/trace.hpp"
 #include "purge.hpp"
 #include "uninstall.hpp"
+#include "update.hpp"
 #include "events.hpp"
 #include "service.hpp"
 
@@ -763,6 +764,7 @@ void print_usage() {
                   "  rearguard scan <setup|runtime> [options]\n"
                   "  rearguard observe <start|profile|status|capture|windows|promote|proposals> [options]\n"
                   "  rearguard workflow <init|show|outbox|artifact|apply|export-window|generation-request|sync|sync-once> [options]\n"
+                  "  rearguard update [--version VERSION] [--check]\n"
                   "  rearguard uninstall [--prefix <dir>] [--dry-run] [--yes] [--json]\n");
 }
 
@@ -984,6 +986,20 @@ int run_main(int argc, char** argv) {
             return 1;
         }
         return cmd_replay(profile_path, trace_path, out_path, critic_lib_dir, json);
+    }
+
+    if (cmd == "update") {
+        if (argc == 3 && std::string(argv[2]) == "--help") {
+            std::printf("rearguard update [--version VERSION] [--check]\n");
+            return 0;
+        }
+        std::string version = "latest";
+        bool check_only = false;
+        FlagParser flags;
+        flags.add("--version", &version);
+        flags.add_bool("--check", &check_only);
+        if (!flags.parse(argc, argv, 2)) return 1;
+        return harness::cli::run_update(version, check_only);
     }
 
     if (cmd == "uninstall") {

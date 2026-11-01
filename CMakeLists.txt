@@ -277,7 +277,8 @@ add_executable(harness_cli
   tools/harness_cli/connect.cpp
   tools/harness_cli/help.cpp
   tools/harness_cli/purge.cpp
-  tools/harness_cli/uninstall.cpp)
+  tools/harness_cli/uninstall.cpp
+  tools/harness_cli/update.cpp)
 set_target_properties(harness_cli PROPERTIES OUTPUT_NAME rearguard)
 target_include_directories(harness_cli PRIVATE src tools/harness_cli)
 target_link_libraries(harness_cli PRIVATE
@@ -341,6 +342,10 @@ target_link_libraries(harness_cli PRIVATE harness_tiny_critic)
 option(HARNESS_BUILD_TESTS "Build tests" ON)
 if(HARNESS_BUILD_TESTS)
   enable_testing()
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME harness_update_tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/update_test.py
+      $<TARGET_FILE:harness_cli> ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
   add_test(NAME harness_cli_lifecycle_tests
     COMMAND ${CMAKE_COMMAND}
       -DCLI=$<TARGET_FILE:harness_cli>
@@ -450,7 +455,7 @@ install(TARGETS harness_kernel harness_kernel_static harness_cli harness_critic 
 install(DIRECTORY include/harness DESTINATION include)
 install(FILES runtime/edge-runtime.json DESTINATION share/harness/runtime)
 install(FILES observation/contexts/so101_intrusion.json DESTINATION share/harness/contexts)
-install(PROGRAMS scripts/install_runtime_deps.sh DESTINATION share/harness/install)
+install(PROGRAMS scripts/install_runtime_deps.sh scripts/install.sh DESTINATION share/harness/install)
 
 if(HARNESS_BUILD_TESTS)
   add_executable(harness_abi_consumer tests/abi/c_consumer.c)

@@ -82,7 +82,20 @@ json_field() {
 RELEASE_VERSION="$(json_field version "$WORK/manifest.json")"
 TARBALL_PATH="$(json_field path "$WORK/manifest.json")"
 TARBALL_SHA="$(json_field sha256 "$WORK/manifest.json")"
-[ -n "$TARBALL_PATH" ] && [ -n "$TARBALL_SHA" ] || err "malformed manifest at $BASE_URL/$MANIFEST_NAME"
+[ -n "$RELEASE_VERSION" ] && [ -n "$TARBALL_PATH" ] && [ -n "$TARBALL_SHA" ] || err "malformed manifest at $BASE_URL/$MANIFEST_NAME"
+
+# An update check never downloads/replaces binaries or stops the service.
+if [ "${REARGUARD_UPDATE_CHECK_ONLY:-0}" = 1 ]; then
+  printf 'Installed: %s\nAvailable: %s\n' "${REARGUARD_UPDATE_FROM:-unknown}" "$RELEASE_VERSION"
+  exit 0
+fi
+if [ -n "${REARGUARD_UPDATE_FROM:-}" ] && [ "$REARGUARD_UPDATE_FROM" = "$RELEASE_VERSION" ]; then
+  okay "Rearguard $RELEASE_VERSION is already installed"
+  exit 0
+fi
+# Pin the resolved version so a concurrently published latest release cannot
+# change the tarball between manifest lookup and download.
+BASE_URL="https://github.com/$REPO/releases/download/v$RELEASE_VERSION"
 
 step "Downloading Rearguard CLI $RELEASE_VERSION"
 curl -fsSL "$BASE_URL/$TARBALL_PATH" -o "$WORK/kernel.tar.gz" \

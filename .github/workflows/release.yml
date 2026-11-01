@@ -107,6 +107,8 @@ jobs:
           mkdir -p "${extracted}"
           tar -xzf "${artifact}" -C "${extracted}"
           installed="${extracted}/${package_root}"
+          test -f "${installed}/share/harness/install/install.sh"
+          "${installed}/bin/rearguard" update --help
           test "$("${installed}/bin/rearguard" --version)" = "rearguard ${GITHUB_REF_NAME#v}"
           "${installed}/bin/rearguard" abi
           critic_usage="${RUNNER_TEMP}/harness-critic-usage.txt"

@@ -46,6 +46,27 @@ unpacks this same tarball, verifies the same SHA256 against the same
 C ABI. That is what makes *"the thresholds were derived with the code that
 enforces them"* a property of the build rather than a claim in a document.
 
+## Updating an installed edge
+
+```sh
+rearguard update --check                 # Show installed and available versions
+rearguard update                         # Upgrade to the latest published release
+rearguard update --version v0.4.28        # Select a published version
+```
+
+The command uses the original installer bundled in the verified release, keeps
+its actual installation prefix, verifies the downloaded artifact SHA-256, and
+restarts the service after replacing program files. Pairing credentials, profile
+stores and recordings remain in place. An already installed version is a no-op.
+A check or checksum failure does not replace binaries or stop the service.
+Updating interrupts observation while the service restarts; finish pending
+incident exports before updating.
+
+Older releases without this command need one upgrade through the original
+installation flow (`https://rearguard.dev/install`). Run that installer again
+without uninstalling first. `rearguard uninstall` removes durable state and
+pairing; it is not the upgrade procedure.
+
 ## Install
 
 ```bash

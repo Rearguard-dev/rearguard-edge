@@ -132,6 +132,10 @@ Persistent workflow:
                --robot-id 00000000-0000-0000-0000-000000000000
 
 Installation:
+  rearguard update [--version VERSION] [--check]
+      Example: rearguard update --check
+      Example: rearguard update
+      Uses the original installer, preserves pairing and recordings, restarts the service.
   rearguard uninstall [--prefix DIR] [--dry-run] [--yes] [--json]
       Example: rearguard uninstall --dry-run
 
