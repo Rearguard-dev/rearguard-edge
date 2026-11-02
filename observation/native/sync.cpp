@@ -55,7 +55,12 @@ public:
 class BackendTransport final : public WorkflowTransport {
 public:
   explicit BackendTransport(DeviceCredentials credentials)
-      : credentials_(std::move(credentials)) {}
+      : credentials_(std::move(credentials)), connection_(curl_easy_init()) {
+    require(connection_ != nullptr, "could not initialize HTTPS request");
+  }
+  ~BackendTransport() override { curl_easy_cleanup(connection_); }
+  BackendTransport(const BackendTransport &) = delete;
+  BackendTransport &operator=(const BackendTransport &) = delete;
 
   void upload(const std::string &robot_id, const Json &snapshot,
               const Json &receipts) override {
@@ -93,6 +98,28 @@ public:
       } catch (const std::exception &error) {
         command["_trigger_error"] = error.what();
       }
+      // A slow queue request must not be the only clock sample. Probe the
+      // lightweight endpoint before rejecting, keeping the original click.
+      for (int attempt = 0; attempt < 2 && command.contains("_trigger_error") &&
+           command.at("_trigger_error").get<std::string>().find(
+               "incident clock uncertainty exceeds") == 0; ++attempt) {
+        try {
+          const auto probe_wall = wall_ns(), probe_mono = monotonic_ns();
+          const auto clock = request("GET", "/harness-profiles/clock", nullptr);
+          const auto probe_end = wall_ns(), probe_elapsed = monotonic_ns() - probe_mono;
+          auto sampled = command;
+          sampled["_server_clock"] = {
+              {"received_ns", std::to_string(static_cast<Ns>(
+                  std::llround(clock.at("received_ms").get<double>() * 1e6)))},
+              {"sent_ns", std::to_string(static_cast<Ns>(
+                  std::llround(clock.at("sent_ms").get<double>() * 1e6)))}};
+          command["_aligned_trigger"] = align_incident_trigger(
+              sampled, probe_wall, probe_end, probe_elapsed);
+          command.erase("_trigger_error");
+        } catch (const std::exception &error) {
+          command["_trigger_error"] = error.what();
+        }
+      }
     }
     return result;
   }
@@ -119,11 +146,14 @@ public:
 
 private:
   DeviceCredentials credentials_;
+  CURL *connection_;
 
   Json request(const std::string &method, const std::string &path,
-               const Json &payload) const {
-    CURL *curl = curl_easy_init();
-    require(curl != nullptr, "could not initialize HTTPS request");
+               const Json &payload) {
+    // Reset request options, retaining libcurl's connection/DNS/TLS caches.
+    // Clock probes should not pay for a new handshake on every sample.
+    CURL *curl = connection_;
+    curl_easy_reset(curl);
     std::string response;
     char error[CURL_ERROR_SIZE]{};
     const std::string url = credentials_.backend_url + path;
@@ -153,8 +183,9 @@ private:
       curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     const std::string failure =
         error[0] != '\0' ? error : curl_easy_strerror(code);
+    // Drop pointers to this request's stack data before their lifetime ends.
+    curl_easy_reset(curl);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     require(code == CURLE_OK, "workflow backend request failed: " + failure);
     if (status < 200 || status >= 300) {
       std::string detail = response;

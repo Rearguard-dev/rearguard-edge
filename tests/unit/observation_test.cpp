@@ -298,6 +298,23 @@ void incident_timing_tests() {
         "browser and edge network uncertainty retained");
   rejects([&] { align_incident_trigger(command, local, local + 200000000, 100000000); }, "clock changed");
   rejects([&] { align_incident_trigger(command, local, local + 2000000000LL, 2000000000LL); }, "uncertainty");
+  // A fresh clock probe after a slow poll still maps the original click,
+  // rather than shifting the evidence window to the retry instant.
+  auto probed = command;
+  probed["_server_clock"] = {
+      {"received_ns", std::to_string(server + 2040000000LL)},
+      {"sent_ns", std::to_string(server + 2060000000LL)}};
+  const auto retried = align_incident_trigger(
+      probed, local + 2000000000LL, local + 2100000000LL, 100000000);
+  check(retried.at("edge_trigger_wall_ns") == aligned.at("edge_trigger_wall_ns"),
+        "fresh probe preserves original click after slow queue poll");
+  check(retried.at("total_clock_uncertainty_ms") == 52,
+        "fresh probe uses its own network bound");
+  probed["_server_clock"] = {
+      {"received_ns", std::to_string(server + 11040000000LL)},
+      {"sent_ns", std::to_string(server + 11060000000LL)}};
+  rejects([&] { align_incident_trigger(probed, local + 11000000000LL,
+      local + 11100000000LL, 100000000); }, "expired");
   auto stale = command;
   stale["payload"]["trigger"]["server_trigger_ms"] = static_cast<double>(server - 20000000000LL)/1e6;
   rejects([&] { align_incident_trigger(stale, local, local + 100000000, 100000000); }, "expired");
