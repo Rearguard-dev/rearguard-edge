@@ -232,7 +232,8 @@ add_library(harness_observation STATIC
   observation/native/common.cpp observation/native/store.cpp
   observation/native/binding.cpp
   observation/native/evidence.cpp observation/native/capture_context.cpp observation/native/runtime.cpp observation/native/sync.cpp
-  observation/native/recording_upload.cpp
+  observation/native/recording_upload.cpp observation/native/execution_sampling.cpp
+  observation/native/model_cache.cpp
   observation/native/events.cpp observation/native/service.cpp
   observation/native/commands.cpp)
 target_include_directories(harness_observation PUBLIC observation/native)
@@ -295,6 +296,7 @@ option(HARNESS_WITH_TENSORRT "Enable native TensorRT 10 critic inference on Jets
 find_package(Threads REQUIRED)
 add_library(harness_tiny_critic STATIC
   src/tiny_critic/critic.cpp src/tiny_critic/onnx.cpp
+  src/tiny_critic/physical.cpp
   src/tiny_critic/tensorrt.cpp src/tiny_critic/worker.cpp)
 target_include_directories(harness_tiny_critic PUBLIC src/tiny_critic)
 target_link_libraries(harness_tiny_critic PUBLIC harness_observation Threads::Threads PRIVATE harness_flags)
@@ -320,7 +322,7 @@ if(HARNESS_WITH_ROS2)
   find_library(TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
   target_include_directories(harness_tiny_critic SYSTEM PRIVATE ${TURBOJPEG_INCLUDE_DIR})
   target_link_libraries(harness_tiny_critic PRIVATE ${TURBOJPEG_LIBRARY})
-  target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_ros.cpp src/tiny_critic/jpeg.cpp)
+  target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_ros.cpp src/tiny_critic/jpeg.cpp src/tiny_critic/physical_ros.cpp)
   target_link_libraries(harness_tiny_critic PRIVATE geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
   # ros.cpp calls make_learned_critic(), implemented in replay_ros.cpp. Declare
   # the reverse static-library dependency so CMake repeats the archive cycle
@@ -333,6 +335,15 @@ endif()
 add_executable(harness_critic src/tiny_critic/main.cpp)
 target_link_libraries(harness_critic PRIVATE harness_tiny_critic harness_flags)
 target_link_libraries(harness_cli PRIVATE harness_tiny_critic)
+if(HARNESS_WITH_ONNX AND UNIX AND NOT APPLE)
+  set_target_properties(harness_cli harness_critic PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+  get_filename_component(ONNXRUNTIME_LIBRARY_DIRECTORY "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
+  install(DIRECTORY "${ONNXRUNTIME_LIBRARY_DIRECTORY}/" DESTINATION lib
+    FILES_MATCHING PATTERN "libonnxruntime.so*" PATTERN "libonnxruntime_providers_shared.so")
+  if(EXISTS "${ONNXRUNTIME_ROOT}/share/onnxruntime")
+    install(DIRECTORY "${ONNXRUNTIME_ROOT}/share/onnxruntime" DESTINATION share)
+  endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests. Google Test kept out for the same reason the legacy build avoided
@@ -357,16 +368,38 @@ if(HARNESS_BUILD_TESTS)
   add_executable(harness_tiny_critic_tests tests/unit/tiny_critic_test.cpp)
   target_link_libraries(harness_tiny_critic_tests PRIVATE harness_tiny_critic harness_flags)
   add_test(NAME harness_tiny_critic_tests COMMAND harness_tiny_critic_tests)
+  add_executable(harness_model_cache_tests tests/unit/model_cache_test.cpp)
+  target_link_libraries(harness_model_cache_tests PRIVATE harness_tiny_critic harness_flags)
+  add_test(NAME harness_model_cache_tests COMMAND harness_model_cache_tests)
+  if(HARNESS_WITH_ROS2)
+    add_executable(harness_physical_ros_tests tests/unit/physical_ros_test.cpp)
+    target_include_directories(harness_physical_ros_tests SYSTEM PRIVATE ${TURBOJPEG_INCLUDE_DIR})
+    target_link_libraries(harness_physical_ros_tests PRIVATE harness_tiny_critic harness_flags ${TURBOJPEG_LIBRARY})
+    add_test(NAME harness_physical_ros_tests COMMAND harness_physical_ros_tests)
+    set_tests_properties(harness_physical_ros_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
   add_executable(harness_observation_tests tests/unit/observation_test.cpp)
   target_link_libraries(harness_observation_tests PRIVATE harness_tiny_critic harness_flags)
   target_compile_definitions(harness_observation_tests PRIVATE
     HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json")
   add_test(NAME harness_observation_tests COMMAND harness_observation_tests)
+  add_executable(harness_execution_sampling_tests tests/unit/execution_sampling_test.cpp)
+  target_link_libraries(harness_execution_sampling_tests PRIVATE harness_observation harness_flags)
+  add_test(NAME harness_execution_sampling_tests COMMAND harness_execution_sampling_tests)
+  add_executable(harness_recording_upload_fixture tests/unit/recording_upload_fixture.cpp)
+  target_link_libraries(harness_recording_upload_fixture PRIVATE harness_observation harness_flags)
+  target_compile_definitions(harness_recording_upload_fixture PRIVATE
+    HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json")
+  add_test(NAME harness_recording_upload_http_tests COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/recording_upload_http_test.py $<TARGET_FILE:harness_recording_upload_fixture>)
   add_test(NAME harness_topology_prefix_tests
     COMMAND ${CMAKE_COMMAND}
       -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/topology_prefix_test.cmake)
   if(HARNESS_WITH_ROS2)
+    add_executable(harness_execution_sampling_ros_tests tests/unit/execution_sampling_ros_test.cpp)
+    target_link_libraries(harness_execution_sampling_ros_tests PRIVATE harness_observation harness_flags)
+    add_test(NAME harness_execution_sampling_ros_tests COMMAND harness_execution_sampling_ros_tests)
     add_executable(harness_jpeg_tests tests/unit/jpeg_test.cpp src/tiny_critic/jpeg.cpp)
     target_include_directories(harness_jpeg_tests PRIVATE src/tiny_critic ${TURBOJPEG_INCLUDE_DIR})
     target_link_libraries(harness_jpeg_tests PRIVATE ${TURBOJPEG_LIBRARY} harness_flags)

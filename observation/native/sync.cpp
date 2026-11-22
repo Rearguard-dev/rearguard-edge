@@ -1,5 +1,7 @@
 #include "sync.hpp"
 #include "events.hpp"
+#include "model_cache.hpp"
+#include "runtime.hpp"
 
 #include <curl/curl.h>
 #include <signal.h>
@@ -11,6 +13,8 @@
 #include <iostream>
 #include <regex>
 #include <thread>
+#include <fstream>
+#include <cctype>
 
 namespace harness::observation {
 namespace {
@@ -39,6 +43,7 @@ std::string default_credentials_path() {
 std::size_t append_response(char *data, std::size_t size, std::size_t count,
                             void *output) {
   const auto bytes = size * count;
+  if (bytes > 4*1024*1024 || static_cast<std::string *>(output)->size() > 4*1024*1024-bytes) return 0;
   static_cast<std::string *>(output)->append(data, bytes);
   return bytes;
 }
@@ -144,12 +149,17 @@ public:
     return request("GET", path, nullptr);
   }
 
+  Json model(const std::string &etag) {
+    return request("GET","/harness-profiles/edge/critic-model?device_id="+
+      credentials_.device_id+"&tensor_contracts=2",nullptr,etag);
+  }
+
 private:
   DeviceCredentials credentials_;
   CURL *connection_;
 
   Json request(const std::string &method, const std::string &path,
-               const Json &payload) {
+               const Json &payload,const std::string &etag={}) {
     // Reset request options, retaining libcurl's connection/DNS/TLS caches.
     // Clock probes should not pay for a new handshake on every sample.
     CURL *curl = connection_;
@@ -163,6 +173,23 @@ private:
     curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, secret_header.c_str());
+    if (!etag.empty()) {
+      require(std::regex_match(etag,std::regex("\"[0-9a-f]{64}\"")),"invalid model ETag");
+      headers=curl_slist_append(headers,("If-None-Match: "+etag).c_str());
+    }
+    std::string response_etag;
+    curl_easy_setopt(curl,CURLOPT_HEADERFUNCTION,+[](char *p,std::size_t s,std::size_t n,void *target)->std::size_t {
+      const auto bytes=s*n;
+      std::string line(p,bytes);std::string lower=line;
+      std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+      if (lower.starts_with("etag:")) {
+        auto value=line.substr(5);const auto first=value.find_first_not_of(" \t\r\n");
+        if (first!=std::string::npos) value=value.substr(first,value.find_last_not_of(" \t\r\n")-first+1);
+        if (value.size()<256) *static_cast<std::string *>(target)=value;
+      }
+      return bytes;
+    });
+    curl_easy_setopt(curl,CURLOPT_HEADERDATA,&response_etag);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_response);
@@ -187,6 +214,7 @@ private:
     curl_easy_reset(curl);
     curl_slist_free_all(headers);
     require(code == CURLE_OK, "workflow backend request failed: " + failure);
+    if (status==304) return {{"status","not_modified"}};
     if (status < 200 || status >= 300) {
       std::string detail = response;
       try {
@@ -200,12 +228,75 @@ private:
     }
     if (response.empty()) return Json::object();
     try {
-      return Json::parse(response);
+      auto parsed=Json::parse(response);
+      if (!response_etag.empty() && parsed.is_object()) parsed["_etag"]=response_etag;
+      return parsed;
     } catch (const Json::exception &) {
       throw std::runtime_error("workflow backend returned invalid JSON");
     }
   }
 };
+
+void download_model_file(const Json &file,const fs::path &path,std::stop_token stop) {
+  const auto url=file.at("url").get<std::string>();
+  require(url.starts_with("https://") && file.at("headers").empty(),"unsupported model download URL or headers");
+  struct Output {std::ofstream stream;std::size_t remaining;std::stop_token stop;};
+  Output output{std::ofstream(path,std::ios::binary|std::ios::trunc),file.at("size").get<std::size_t>(),stop};
+  require(output.stream.good(),"cannot stage model download");
+  CURL *curl=curl_easy_init();require(curl!=nullptr,"cannot initialize model download");
+  curl_easy_setopt(curl,CURLOPT_URL,url.c_str());
+  curl_easy_setopt(curl,CURLOPT_CONNECTTIMEOUT,10L);
+  curl_easy_setopt(curl,CURLOPT_TIMEOUT,60L);
+  curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,0L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+  curl_easy_setopt(curl,CURLOPT_PROTOCOLS_STR,"https");
+#else
+  curl_easy_setopt(curl,CURLOPT_PROTOCOLS,CURLPROTO_HTTPS);
+#endif
+  curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,+[](char *p,std::size_t s,std::size_t n,void *target)->std::size_t {
+    auto &out=*static_cast<Output *>(target);const auto bytes=s*n;
+    if (out.stop.stop_requested() || bytes>out.remaining) return 0;
+    out.stream.write(p,static_cast<std::streamsize>(bytes));out.remaining-=bytes;
+    return out.stream.good()?bytes:0;
+  });
+  curl_easy_setopt(curl,CURLOPT_WRITEDATA,&output);
+  curl_easy_setopt(curl,CURLOPT_NOPROGRESS,0L);
+  curl_easy_setopt(curl,CURLOPT_XFERINFOFUNCTION,+[](void *p,curl_off_t,curl_off_t,curl_off_t,curl_off_t)->int {
+    return static_cast<Output *>(p)->stop.stop_requested()?1:0;
+  });
+  curl_easy_setopt(curl,CURLOPT_XFERINFODATA,&output);
+  const auto code=curl_easy_perform(curl);long status=0;
+  curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&status);curl_easy_cleanup(curl);
+  output.stream.close();
+  require(code==CURLE_OK && status==200 && output.remaining==0 && output.stream.good(),"model download failed or size differs");
+}
+
+void sync_models(const DeviceCredentials &credentials,const fs::path &root,std::stop_token stop) {
+  BackendTransport transport(credentials);ModelCache cache(root);std::string etag;
+  while (!stop.stop_requested()) {
+    try {
+      auto response=transport.model(etag);
+      if (response.value("status","")!="not_modified") {
+        const auto next_etag=response.value("_etag","");response.erase("_etag");
+        const auto result=cache.refresh(response,[&](const Json &file,const fs::path &path){
+          download_model_file(file,path,stop);
+        },[&](const fs::path &path,const Json &selection){
+          const auto profile=Store(root.parent_path()).snapshot();
+          require(selection.at("profile_id")==profile.at("profile_id") && selection.at("binding_hash")==profile.at("binding_hash"),"resolved physical model belongs to another profile or binding");
+          return make_physical_critic(path,profile.at("binding"),selection)->ready();
+        });
+        etag=next_etag;
+        record_event("physical_model","resolve",result.value("status","")=="loaded"?"success":"pending",result);
+      }
+    } catch (const std::exception &error) {
+      if (!stop.stop_requested()) {
+        atomic_json(root/"status.json",{{"status","update_failed"},{"error",error.what()},{"active",cache.active()}});
+        record_event("physical_model","update","failure",{{"message",error.what()}});
+      }
+    }
+    for (int i=0;i<600 && !stop.stop_requested();++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
 
 } // namespace
 
@@ -252,6 +343,10 @@ WorkflowConnector::WorkflowConnector(Store store, std::string robot_id,
 
 Json WorkflowConnector::cycle(bool heartbeat) {
   auto snapshot = store_.snapshot();
+  const auto physical=store_.root/"models"/"runtime.json";
+  if(fs::is_regular_file(physical)) {
+    try {snapshot["physical_critic"]=read_json(physical);} catch(const std::exception &) {}
+  }
   auto receipts = store_.pending_sync_receipts();
   const auto revision = snapshot.at("revision").get<Ns>();
   const bool initial_upload = uploaded_revision_ < 0;
@@ -403,6 +498,7 @@ Json run_workflow_sync(const Options &options, bool once) {
   }
 
   sync_interrupted = 0;
+  std::jthread model_sync([&](std::stop_token stop){sync_models(credentials,options.path("--store")/"models",stop);});
   const auto previous_interrupt = ::signal(SIGINT, stop_sync);
   const auto previous_terminate = ::signal(SIGTERM, stop_sync);
   Ns failures = 0;

@@ -77,6 +77,7 @@ struct RecoveryControllerPlaceholder final : ControllerAdapter {
   bool hold(const std::string &) override { return false; }
 };
 std::unique_ptr<CriticAdapter> make_learned_critic(const fs::path &, const Json &);
+std::unique_ptr<CriticAdapter> make_physical_critic(const fs::path &,const Json &,const Json &);
 class Runtime {
   const Store &store_;
   CriticAdapter &critic_;

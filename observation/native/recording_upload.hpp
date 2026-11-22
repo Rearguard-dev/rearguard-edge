@@ -4,11 +4,12 @@
 
 namespace harness::observation {
 
-// Publishes every closed rosbag2 MCAP segment exactly once. A segment is
-// marked submitted only after R2 acknowledges the bytes and the backend has
-// accepted them for asynchronous verification/indexing.
+// Publishes exact incident evidence and selected execution samples. Rolling
+// pre-roll segments are never a monitoring archive. Submitted means accepted
+// for asynchronous verification/indexing, not already verified.
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
-                              const DeviceCredentials &credentials);
+                              const DeviceCredentials &credentials, bool include_execution_samples = true);
+Ns recording_retry_delay_ns(unsigned attempts);
 
 // Long-running, independently supervised upload queue. Recording and the
 // safety service continue even while this process is blocked on cloud I/O.

@@ -33,11 +33,13 @@ void Evidence::tick(Ns stamp, Ns wall) {
     if (w["status"] == "collecting" && stamp >= w["end_ns"].get<Ns>()) {
       Json coverage = Json::object();
       for (const auto &[topic, history] : samples) {
-        Ns count = 0, valid = 0;
+        Ns count = 0, valid = 0, gap = 0, previous = -1;
         Json first = nullptr, last = nullptr;
         for (const auto &s : history)
           if (s["receipt_ros_ns"].get<Ns>() >= w["start_ns"].get<Ns>() &&
               s["receipt_ros_ns"].get<Ns>() <= w["end_ns"].get<Ns>()) {
+            if (previous>=0) gap=std::max(gap,s["receipt_ros_ns"].get<Ns>()-previous);
+            previous=s["receipt_ros_ns"].get<Ns>();
             if (count == 0)
               first = s;
             last = s;
@@ -50,6 +52,7 @@ void Evidence::tick(Ns stamp, Ns wall) {
             {"valid_count", valid},
             {"first", first},
             {"last", last},
+            {"max_receipt_gap_ns", gap},
             {"observed_span_ns", count ? last["receipt_ros_ns"].get<Ns>() -
                                              first["receipt_ros_ns"].get<Ns>()
                                        : 0}};

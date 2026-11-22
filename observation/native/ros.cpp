@@ -3,6 +3,7 @@
 #include "critic_features.hpp"
 #include "evidence.hpp"
 #include "recording.hpp"
+#include "execution_sampling.hpp"
 #include "ros_recovery.hpp"
 #include "runtime.hpp"
 #include "events.hpp"
@@ -281,7 +282,8 @@ public:
   }
 };
 std::pair<bool, Json> validate(const Json &topic, const Json &config,
-                               const rclcpp::SerializedMessage &data) {
+                               const rclcpp::SerializedMessage &data,
+                               std::vector<double> *activity_values = nullptr) {
   const auto type = topic["type"].get<std::string>();
   const auto joints = config["joint_order"].get<std::vector<std::string>>();
   if (type == "sensor_msgs/msg/JointState") {
@@ -297,10 +299,13 @@ std::pair<bool, Json> validate(const Json &topic, const Json &config,
     for (const auto &joint : joints)
       valid =
           valid && positions.contains(joint) && std::isfinite(positions[joint]);
+    if (valid && activity_values)
+      for (const auto &joint:joints) activity_values->push_back(positions.at(joint));
     return {valid, stamp(m.header.stamp)};
   }
   if (type == "std_msgs/msg/Float64MultiArray") {
     const auto m = decode<std_msgs::msg::Float64MultiArray>(data);
+    if (activity_values) *activity_values=m.data;
     return {m.data.size() == joints.size() && finite(m.data), nullptr};
   }
   if (type == "trajectory_msgs/msg/JointTrajectory") {
@@ -310,6 +315,7 @@ std::pair<bool, Json> validate(const Json &topic, const Json &config,
       valid = valid && point.positions.size() == joints.size() &&
               finite(point.positions) && finite(point.velocities) &&
               finite(point.accelerations) && finite(point.effort);
+    if (valid && activity_values) *activity_values=m.points.back().positions;
     return {valid, stamp(m.header.stamp)};
   }
   if (type == "sensor_msgs/msg/CompressedImage") {
@@ -340,6 +346,8 @@ class Observer {
   CriticAdapter *inference_ = &no_inference_;
   std::unique_ptr<ProfileCritic> profile_critic_;
   std::unique_ptr<CriticAdapter> learned_critic_;
+  bool physical_critic_=false;
+  Ns physical_status_written_=-1;
   Json learned_context_;
   rclcpp::Node::SharedPtr node_;
   rclcpp::Context::SharedPtr context_;
@@ -348,6 +356,7 @@ class Observer {
   std::unique_ptr<SwitchingRecoveryController> controller_;
   std::unique_ptr<Runtime> runtime_;
   std::unique_ptr<Recording> writer_;
+  std::unique_ptr<ExecutionSampler> sampler_;
   rclcpp::Publisher<String>::SharedPtr events_, replies_, profiles_;
   std::vector<rclcpp::GenericSubscription::SharedPtr> subscriptions_;
   rclcpp::Subscription<String>::SharedPtr requests_;
@@ -389,6 +398,7 @@ class Observer {
     const auto old_epoch = evidence_.state["epoch"];
     evidence_.tick(node_->now().nanoseconds());
     if (old_epoch != evidence_.state["epoch"]) {
+      if (sampler_) sampler_->reset();
       history_.clear();
       raw_bytes_ = 0;
       detection_marks_.clear();
@@ -419,13 +429,25 @@ class Observer {
       }
       bool valid = false;
       Json source = nullptr;
+      std::vector<double> activity_values;
       try {
-        auto result = validate(topic, config_, *data);
+        auto result = validate(topic, config_, *data, sampler_?&activity_values:nullptr);
         valid = result.first;
         source = result.second;
       } catch (const std::exception &) {
       }
       evidence_.sample(name, now, source, monotonic_ns(), valid);
+      if (sampler_ && valid) {
+        try {
+          const auto monotonic=monotonic_ns();
+          if (topic.value("role","")=="joint_state" && !source.is_null() && source.get<Ns>()>0 &&
+              now-source.get<Ns>()>=-100000000LL && now-source.get<Ns>()<=1000000000LL) {
+            sampler_->joints(activity_values,monotonic);
+          } else if (topic.value("role","")=="action") {
+            sampler_->command(activity_values,monotonic);
+          }
+        } catch (const std::exception &) { /* Sampling must not interrupt observation. */ }
+      }
       ++counts_[name];
       last_wall_[name] = monotonic_ns();
     }
@@ -545,12 +567,28 @@ class Observer {
   void status() {
     tick();
     evidence_.expire();
+    if (sampler_ && store_) {
+      try {
+        require(evidence_.last_clock_advance && monotonic_ns()-*evidence_.last_clock_advance<=1000000000LL,
+                "execution sampling requires an advancing ROS clock");
+        const auto profile=store_->snapshot();
+        if (const auto selected=sampler_->select(*evidence_.now,monotonic_ns(),wall_ns(),profile,evidence_.state)) {
+          auto &window=evidence_.capture(15.,0.,"Unlabeled execution sample");
+          window["execution_sample"]=*selected;
+          window["trigger"]="activity_sample";
+          window["capture_context"]=freeze_capture_context(profile);
+        }
+        evidence_.state["execution_sampling"]=sampler_->status();
+      } catch (const std::exception &error) {
+        evidence_.state["execution_sampling"]={{"status","skipped"},{"reason",error.what()}};
+      }
+    }
     for (const auto &window : evidence_.state["windows"])
       if (window["status"] == "ready" &&
           !announced_.contains(window["id"].get<std::string>())) {
         writer_->close();
         event("window_ready", {{"window_id", window["id"]}});
-        if (store_) {
+        if (store_ && !window.contains("execution_sample")) {
           const auto detection = window.value(
               "detection", Json{{"detector_id", "operator"},
                                 {"evidence_class", window["label"]},
@@ -617,11 +655,11 @@ class Observer {
     observations.epoch = evidence_.state["epoch"].get<Ns>();
     observations.receipt_ros_ns = *evidence_.now;
     observations.messages.assign(history_.begin(), history_.end());
-    if (learned_critic_ && store_->snapshot().at("critic_context") != learned_context_) {
+    if (learned_critic_ && !physical_critic_ && store_->snapshot().at("critic_context") != learned_context_) {
       evidence_.state["critic"] = {{"status", "context_mismatch"}, {"scores", Json::object()}};
       return;
     }
-    if (fresh)
+    if (fresh || physical_critic_)
       if (const auto detection = inference_->evaluate(observations)) {
         try { event("candidate_marked", {{"window", candidate(detection->json())}}); }
         catch (const std::exception &error) {
@@ -635,6 +673,11 @@ class Observer {
       evidence_.state["runtime"] = runtime_->snapshot();
     }
     evidence_.state["critic"] = inference_->telemetry();
+    if(physical_critic_ && (physical_status_written_<0 || monotonic_ns()-physical_status_written_>=1000000000LL)) {
+      auto status=evidence_.state["critic"];status["observed_wall_ns"]=wall_ns();
+      const auto state=status.value("status","");status["running"]=state=="valid" || state=="insufficient_evidence";
+      atomic_json(store_->root/"models"/"runtime.json",status);physical_status_written_=monotonic_ns();
+    }
   }
 
 public:
@@ -653,13 +696,24 @@ public:
       const auto profile = store_->snapshot();
       require(profile["binding_hash"] == digest(config_),
               "observer config differs from workflow binding");
+      try {sampler_=std::make_unique<ExecutionSampler>(store_->root);}
+      catch (const std::exception &error) {
+        evidence_.state["execution_sampling"]={{"status","disabled"},{"reason",error.what()}};
+      }
       const auto deployment = profile.value("critic_deployment", Json(nullptr));
       if (deployment.is_object() && deployment.value("executable", false)) {
         profile_critic_ = std::make_unique<ProfileCritic>(deployment);
         inference_ = profile_critic_.get();
       }
     }
-    if (options_.values.contains("--critic-bundle")) {
+    if (options_.values.contains("--physical-critic-bundle")) {
+      require(store_!=nullptr,"physical model requires a bound profile store");
+      const auto selection=read_json(options_.path("--physical-critic-selection"));
+      const auto profile=store_->snapshot();
+      require(selection.at("profile_id")==profile.at("profile_id") && selection.at("binding_hash")==digest(config_),"physical model selection changed profile binding");
+      learned_critic_=make_physical_critic(options_.path("--physical-critic-bundle"),config_,selection);
+      learned_context_=profile.at("critic_context");physical_critic_=true;inference_=learned_critic_.get();
+    } else if (options_.values.contains("--critic-bundle")) {
       require(store_ != nullptr, "learned shadow critic requires --store for setup identity");
       const auto bundle = options_.path("--critic-bundle");
       const auto manifest = read_json(bundle / "manifest.json");
@@ -733,7 +787,7 @@ public:
         prefix_ + "/requests", 10, [this](const String &m) { request(m); });
     if (profile_critic_ || learned_critic_) {
       double rate = 1;
-      if (learned_critic_) rate = 10;
+      if (learned_critic_) rate = physical_critic_?30:10;
       for (const auto &head : store_->snapshot()["critic_deployment"]["heads"])
         rate = std::max(rate, head["scope"]["required_hz"].get<double>());
       const auto period = std::chrono::nanoseconds(

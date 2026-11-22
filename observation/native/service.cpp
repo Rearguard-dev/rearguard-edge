@@ -306,7 +306,14 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
         record_event("workflow_sync", "started", "success", {{"pid", sync_pid}});
       }
       const auto profile = Store(store).snapshot();
-      const auto critic = profile.value("critic_deployment", Json(nullptr));
+      auto critic = profile.value("critic_deployment", Json(nullptr));
+      const auto physical=load_or_empty(store/"models"/"active.json");
+      const bool physical_ready=physical.is_object() && physical.value("admitted",false) &&
+        physical.value("profile_id","")==profile.value("profile_id","") &&
+        physical.value("binding_hash","")==profile.value("binding_hash","");
+      if(physical_ready)critic={{"id",physical.at("model_id").get<std::string>()+":"+digest(physical).substr(0,16)},
+        {"model_id",physical.at("model_id")},{"executable",true},{"runtime","physical_onnx_v2"},
+        {"mode","shadow"},{"trained",true},{"deployment_validated",false}};
       // A compiled contract that is still waiting for examples/embeddings is
       // visible in status, but must not disrupt observation or masquerade as
       // a live model. Only an executable generation reaches the observer.
@@ -358,7 +365,10 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
           config["observation_config"].get<std::string>(), "--session", active_session.string(),
           "--store", store.string(), "--storage", config.value("storage", "mcap"),
           "--domain-id", std::to_string(*domain), "--wall-timeout", "86400"};
-        if (config.contains("critic_bundle") && config["critic_bundle"].is_string()) {
+        if (physical_ready) {
+          observer_args.insert(observer_args.end(),{"--physical-critic-bundle",physical.at("path").get<std::string>(),
+            "--physical-critic-selection",(store/"models"/"active.json").string()});
+        } else if (config.contains("critic_bundle") && config["critic_bundle"].is_string()) {
           observer_args.insert(observer_args.end(), {"--critic-bundle", config["critic_bundle"].get<std::string>(),
               "--critic-client", config.at("critic_client").get<std::string>()});
         }
@@ -369,11 +379,20 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
         active_critic_id = critic_id;
       }
       export_pending_windows(store, active_session);
+      const auto physical_runtime=load_or_empty(store/"models"/"runtime.json");
+      const bool current_runtime=physical_ready && physical_runtime.is_object() &&
+        physical_runtime.value("model_id","")==physical.value("model_id","") &&
+        physical_runtime.value("binding_hash","")==profile.value("binding_hash","") &&
+        physical_runtime.value("observed_wall_ns",Ns(0))<=wall_ns() &&
+        wall_ns()-physical_runtime.value("observed_wall_ns",Ns(0))<=90000000000LL;
       write_status("running", config, {{"domain_id", *domain},
+                   {"physical_model",load_or_empty(store/"models"/"status.json")},
+                   {"physical_runtime",current_runtime?physical_runtime:Json(nullptr)},
                    {"store", store.string()}, {"session", active_session.string()},
                    {"critic", critic},
-                   {"critic_profile_ready", profile.value("critic_profile_ready", false)},
+                   {"critic_profile_ready", physical_ready || profile.value("critic_profile_ready", false)},
                    {"critic_runtime_status",
+                    physical_ready ? (current_runtime?physical_runtime.value("status","model_loading"):"model_loading") :
                     profile.value("critic_runtime_status", "awaiting_profile_setup")}});
     }
     for (int i = 0; i < 10 && !service_stopping; ++i)

@@ -1,0 +1,192 @@
+# Automatic execution sampling
+
+The native observer selects ordinary-operation windows; the existing supervised
+uploader exports and uploads them. There is no button or additional daemon.
+Samples are **unlabeled**, `training_eligible: false`, and never workflow failure
+candidates. Incident recording and enforcement behavior are unchanged.
+
+## Initial policy
+
+Enabled when a bound native observer starts. An optional profile-store file
+`execution-sampling-policy.json` overrides the defaults below, read on observer
+startup. This file is a local configuration interface, not a cloud/UI setting.
+Disabling or invalid configuration disables sampling without stopping observation.
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "mean_interval_s": 300,
+  "joint_delta": 0.01,
+  "daily_limit": 12,
+  "bootstrap_limit": 40,
+  "failure_ratio": 3,
+  "pool_limit": 200,
+  "max_window_bytes": 67108864,
+  "pool_bytes": 4294967296,
+  "pending_bytes": 268435456
+}
+```
+
+Measured displacement over 100–500 ms must exceed `joint_delta` in at least one
+bound joint. The threshold uses joint position units (radians for SO101); other
+embodiments need an appropriate setting. Valid, recently source-stamped joint
+states must continue arriving. Changed command targets also count as work,
+including possible stalls; repeated identical targets and a first target alone
+do not. Camera traffic and policy connectivity do not count as activity. The
+initial command threshold uses the same units as position; non-position
+interfaces should use a separately reviewed policy before collecting there.
+
+Activity stays eligible for twenty seconds after the latest movement/change,
+including stationary pauses long enough to yield a fully stationary 15-second window. No execution/action-server state is inferred
+from mere ROS topic presence. The initial implementation does not allocate
+separate pause/motion quotas or pose-diversity buckets.
+
+A random draw independent of critic scores selects a retrospective 15-second
+window. Intervals are exponential in accumulated eligible wall time, floored at
+15 seconds. Required streams must cover the interval, with no receipt gap or
+endpoint gap above one second, and no known invalid messages. The exported MCAP
+is checked again, so expired pre-roll cannot be accepted using old metadata.
+Image payload decoding remains the existing cloud verifier/renderer's job.
+Camera acquisition/delivery delay is not relabeled or rewritten. Command events
+inside the window are retained; zero command events is allowed. An earlier
+latched command is not fabricated; downstream annotation/training must account
+for missing initial command context.
+
+## Budgets and durability
+
+Pool capacity is `min(pool_limit, max(bootstrap_limit, failure_ratio * F))`, where
+F counts distinct real evidence hashes attached to accepted failures in the
+local profile snapshot, never synthetic examples or raw critic alerts.
+
+The profile-wide exclusive lock and atomic `execution-sampling-ledger.json`
+reserve capacity before capture. UTC-day counts and byte reservations survive
+observer restarts and ROS clock resets. A selection reserves the maximum window
+size conservatively; rejected/crashed selections still consume a daily/pool
+reservation. Submitted or rejected entries release pending capacity. This bounds
+both offline queues and total retention without depending on the cloud.
+Sampling pauses if free disk space cannot preserve 250 MB plus two window
+reservations. This is additional to the recorder's existing free-space policy.
+
+At capacity collection pauses. There is **no reservoir replacement, automatic
+deletion, or eviction of old/pinned recordings** in this version. Do not delete
+the ledger to reset quotas while retained recordings exist. Lifecycle/rotation
+needs explicit pinning and a catalog-aware cleanup operation in a later update.
+
+## Export and catalog
+
+Selected windows carry `execution_sample` metadata in session `state.json`.
+They bypass workflow candidate creation. The uploader spools ready samples before
+its network calls, to `execution-samples/<sample-id>.mcap` under the profile
+store. A paired JSON manifest records session/window, selection reason, policy,
+binding/context, SHA256 and size. Incident overlap known before export rejects
+the sample. A later unreported/reported incident does not automatically rewrite
+an already uploaded sample's catalog metadata: all samples remain unlabeled.
+
+Upload uses the same authenticated immutable object grants, completion endpoint
+and asynchronous verification/catalog as incident evidence. Retries reuse the
+same recording identity and content hash. Completion markers say submitted for
+verification, not verified. Network work and MCAP export happen in the existing
+uploader process, outside the observer/safety loop. Incident uploads retain
+priority. If the uploader is blocked long enough that selected pre-roll expires,
+that sample is rejected; it is not substituted with a newer recording.
+
+The existing generic recording catalog accepts `manifest.kind=execution_sample`;
+no database migration is required. Incident-specific automatic preview jobs and
+investigation/seed joins are not reused. Training admission/review, fixed-eval
+reservation, automatic labeling, cloud configuration and dedicated sampling UI
+are **not** added by this edge change. Review source samples before using them.
+
+## Visibility and verification
+
+The current session's `state.json` includes `execution_sampling` with policy,
+reservation count, draw progress, and sampling/budget status. The event log
+reports execution_sampling/spooled and execution_sampling/rejected; immutable
+completion/rejection JSON files live alongside sample MCAPs. Stream headers and
+joint/command values are unchanged.
+
+Build with ROS2 enabled and run the isolated targets:
+
+```sh
+ctest --test-dir <build> --output-on-failure \
+  -R 'harness_execution_sampling(_ros)?_tests|harness_observation_tests'
+```
+
+Five policy check groups cover activity gating, coverage/clocks, durable budgets,
+incident separation/unlabeled status, and policy/one-owner behavior. The offline
+MCAP test checks both cameras and joint states, unchanged acquisition stamps,
+sparse commands, incomplete coverage and byte limits. It does not start a ROS
+node, policy, cloud upload or robot motion. Production upload must still be
+observed after the operator deploys; passing offline checks is not live admission.
+
+Verified on 2026-11-21 in the isolated Linux laptop cache build: ROS-enabled CLI
+compiled; all three CTest targets passed (42.44 seconds total), including five
+sampler groups and the offline MCAP checks. No binaries were installed, no service
+was restarted and no real recording was uploaded during verification.
+
+
+## Upload efficiency follow-up
+
+The uploader reuses separate per-thread API/object HTTP sessions, retaining
+connection/DNS/TLS caches while resetting request options between calls. It
+requests CPU niceness 10 so hashing/export/TLS receive lower scheduling priority
+than the observer under contention; this is best effort, not a resource guarantee.
+Joint and command activity checks reuse the values already decoded for input
+validation rather than deserializing the message a second time.
+
+Fresh transfers use grant → direct PUT → complete, without a speculative complete
+request first. Retried transfers probe complete to reconcile bytes whose prior
+acknowledgement was lost. Persistent per-recording retry deadlines back off from
+5 to 300 seconds; submitted samples are skipped before manifest parsing and
+hashing. The ordinary sample queue is scanned once per distinct binding per
+uploader polling pass, rather than once for every historical session. All file
+hash and cloud verification checks remain in place.
+
+There is no live ROS stream sent to Supabase or Modal. Selected exact MCAP files
+go directly from edge to private R2 over presigned HTTPS PUT URLs. The API handles
+authentication, grants and completion metadata; the existing cloud worker verifies
+and indexes the object, and Supabase holds the catalog. JPEG/PNG messages are
+stored as received; no additional camera re-encoding was added. Compression
+options for raw image topics and resumable multipart upload need measurement
+before changing their defaults. Current ordinary samples are capped at 64 MiB.
+
+MCAP export and HTTP still share one supervised uploader process. A long blocked
+network request can delay spooling a newly selected window until its pre-roll
+expires, resulting in explicit rejection. Separating export scheduling from
+network I/O remains a larger follow-up; connection reuse/backoff do not eliminate
+that limitation. Real throughput and observer latency have not been benchmarked.
+
+The localhost HTTP test uses synthetic bytes/credentials and checks fresh request
+order, durable retry suppression, completion-only recovery after an interrupted
+acknowledgement, submitted-file skipping and connection reuse. Run it alongside
+the sampler checks using CTest target `harness_recording_upload_http_tests`.
+
+## Upload efficiency follow-up
+
+The uploader retains separate reusable HTTP sessions for API and R2 requests,
+resetting per-request options while keeping connection/DNS/TLS session caches.
+Fresh uploads request a grant directly, PUT once, then complete; only retries
+probe completion first to reconcile a possibly successful earlier PUT.
+
+Incident and sample retries persist their attempt counters and wall-clock retry
+schedule (5, 10, 20, 40, 80, 160, then at most 300 seconds). A failed sample does
+not prevent other samples from being attempted. Completed manifests are skipped
+before parsing/hashing, sample queues are scanned at most once per successful
+binding per polling pass, and already-retired pre-roll avoids repeated rewrites.
+The uploader requests lower CPU scheduling priority (nice 10); this is not a
+network bandwidth cap. Joint/command activity reuses validation's decoded values
+instead of decoding each ROS message a second time.
+
+The localhost HTTP fixture uses synthetic bytes and dummy credentials only. It
+checks the first-attempt request sequence, lost-completion reconciliation without
+a second PUT, persisted backoff, completed skips, and two reused HTTP connections
+(one API, one object transfer). It does not benchmark the real uplink or cloud.
+Zenoh is not introduced: ROS transport and immutable MCAP transfer remain separate
+layers. A long blocked PUT can still delay the next spool pass; separate export
+and network scheduling and multipart resume are future work, not certified here.
+
+Efficiency validation on 2026-11-21: the ROS-enabled CLI compiled; all four
+observation/sampler/MCAP/HTTP CTest targets passed (36.30 seconds). After the final
+queue-scan guard adjustment, the CLI and HTTP fixture rebuilt and the HTTP test
+passed again (1.95 seconds). Tests ran in the isolated Linux cache; no installed
+service, real recording, cloud account or robot execution was changed.

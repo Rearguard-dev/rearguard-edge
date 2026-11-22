@@ -1,4 +1,5 @@
 #include "recording.hpp"
+#include "execution_sampling.hpp"
 #include <iomanip>
 #include <rosbag2_cpp/reader.hpp>
 #include <set>
@@ -117,6 +118,8 @@ fs::path export_window(const fs::path &session, const Json &window,
       segments.push_back(s);
   require(!segments.empty(), "no closed evidence segments for window");
   std::map<std::string, unsigned> counts;
+  Json actual_coverage=Json::object();
+  std::size_t sample_bytes=0;
   std::set<std::string> registered;
   rosbag2_cpp::Writer writer;
   writer.open(storage_options(destination, "mcap"), {"cdr", "cdr"});
@@ -132,13 +135,28 @@ fs::path export_window(const fs::path &session, const Json &window,
       const auto message = reader.read_next();
       if (message->recv_timestamp >= window["start_ns"].get<Ns>() &&
           message->recv_timestamp <= window["end_ns"].get<Ns>()) {
+        if (window.contains("execution_sample")) {
+          sample_bytes+=message->serialized_data->buffer_length;
+          require(sample_bytes<=window.at("execution_sample").at("max_bytes").get<std::size_t>(),"sample exceeds byte budget");
+          auto &c=actual_coverage[message->topic_name];
+          const auto time=message->recv_timestamp;
+          if (c.is_null()) c={{"count",0},{"valid_count",0},{"max_receipt_gap_ns",0},
+                            {"first",{{"receipt_ros_ns",time}}},{"last",{{"receipt_ros_ns",time}}}};
+          c["max_receipt_gap_ns"]=std::max(c["max_receipt_gap_ns"].get<Ns>(),time-c["last"]["receipt_ros_ns"].get<Ns>());
+          c["last"]={{"receipt_ros_ns",time}};
+          c["count"]=c["count"].get<Ns>()+1;c["valid_count"]=c["count"];
+        }
         writer.write(message);
         ++counts[message->topic_name];
       }
     }
   }
   writer.close();
-  for (const auto &group : required_topic_groups(config)) {
+  if (window.contains("execution_sample")) {
+    require(sample_coverage(config,window.at("coverage"),window["start_ns"],window["end_ns"]),"sample observer coverage incomplete");
+    require(sample_coverage(config,actual_coverage,window["start_ns"],window["end_ns"]),"sample exported coverage incomplete");
+  }
+  if (!window.contains("execution_sample")) for (const auto &group : required_topic_groups(config)) {
     bool covered = false;
     for (const auto &name : group) covered = covered || counts[name] >= 2;
     require(covered, "exported MCAP lacks required topic coverage");
@@ -148,6 +166,8 @@ fs::path export_window(const fs::path &session, const Json &window,
     if (entry.path().extension() == ".mcap")
       files.push_back(entry.path());
   require(files.size() == 1, "expected exactly one exported MCAP");
+  if (window.contains("execution_sample"))
+    require(fs::file_size(files.front())<=window.at("execution_sample").at("max_bytes").get<std::uintmax_t>(),"sample MCAP exceeds byte budget");
   return files.front();
 }
 } // namespace harness::observation

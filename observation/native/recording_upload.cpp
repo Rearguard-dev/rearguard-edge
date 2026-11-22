@@ -1,5 +1,6 @@
 #include "recording_upload.hpp"
 #include "events.hpp"
+#include "execution_sampling.hpp"
 
 #include <algorithm>
 #include <curl/curl.h>
@@ -8,13 +9,24 @@
 #include <cstdio>
 #include <fstream>
 #include <set>
+#include <regex>
 #include <thread>
+#include <sys/resource.h>
 
 namespace harness::observation {
+Ns recording_retry_delay_ns(unsigned attempts) {
+  return std::min<Ns>(300,5LL*(1LL<<std::min(attempts?attempts-1:0U,6U)))*1000000000LL;
+}
 namespace {
 volatile sig_atomic_t uploader_stopping = 0;
 
 void uploader_stop_handler(int) { uploader_stopping = 1; }
+
+struct HttpSession {
+  CURL *handle=curl_easy_init();
+  ~HttpSession(){if(handle)curl_easy_cleanup(handle);}
+  CURL *reset(){require(handle!=nullptr,"cannot initialize upload HTTP session");curl_easy_reset(handle);return handle;}
+};
 
 fs::path default_credentials_path() {
   if (const auto *value = std::getenv("XDG_CONFIG_HOME"); value && *value)
@@ -33,7 +45,8 @@ std::size_t append_response(char *data, std::size_t size, std::size_t count,
 
 Json backend_request(const DeviceCredentials &credentials,
                      const std::string &path, const Json &payload) {
-  CURL *curl = curl_easy_init();
+  static thread_local HttpSession session;
+  CURL *curl = session.reset();
   require(curl != nullptr, "could not initialize recording upload request");
   std::string response;
   char error[CURL_ERROR_SIZE]{};
@@ -58,7 +71,6 @@ Json backend_request(const DeviceCredentials &credentials,
   if (result == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
   const auto failure = std::string(error[0] ? error : curl_easy_strerror(result));
   curl_slist_free_all(headers);
-  curl_easy_cleanup(curl);
   require(result == CURLE_OK, "recording backend request failed: " + failure);
   require(status >= 200 && status < 300,
           "recording backend returned HTTP " + std::to_string(status) +
@@ -69,7 +81,8 @@ Json backend_request(const DeviceCredentials &credentials,
 void put_file(const fs::path &file, const Json &grant) {
   FILE *input = std::fopen(file.c_str(), "rb");
   require(input != nullptr, "cannot open MCAP for upload");
-  CURL *curl = curl_easy_init();
+  static thread_local HttpSession session;
+  CURL *curl = session.reset();
   require(curl != nullptr, "could not initialize R2 upload");
   curl_slist *headers = nullptr;
   for (auto it = grant.at("required_headers").begin();
@@ -96,7 +109,6 @@ void put_file(const fs::path &file, const Json &grant) {
   if (result == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
   const auto failure = std::string(error[0] ? error : curl_easy_strerror(result));
   curl_slist_free_all(headers);
-  curl_easy_cleanup(curl);
   std::fclose(input);
   require(result == CURLE_OK, "R2 MCAP upload failed: " + failure);
   // A retry may race with or follow a successful PUT whose completion call
@@ -154,9 +166,114 @@ std::uintmax_t directory_bytes(const fs::path &directory) {
   return bytes;
 }
 
+// Spool selected windows before any network call. Unavailable pre-roll is
+// rejected, never replaced by a different interval or called a negative.
+void spool_execution_samples(const fs::path &store,const fs::path &session,const Json &meta) {
+  if (!fs::is_regular_file(session/"state.json")) return;
+  const auto observation=read_json(session/"state.json");
+  const auto directory=store/"execution-samples";
+  fs::create_directories(directory);
+  for (const auto &window:observation.value("windows",Json::array())) {
+    if (!window.contains("execution_sample") || window.value("status","")!="ready") continue;
+    const auto selection=window.at("execution_sample");
+    const auto id=selection.at("id").get<std::string>();
+    require(std::regex_match(id,std::regex("sample-[A-Za-z0-9-]+")),"invalid execution sample identity");
+    if (fs::exists(directory/(id+".json")) || fs::exists(directory/(id+".rejected.json"))) continue;
+    const auto temporary=directory/(id+".export");
+    try {
+      for (const auto &other:observation.at("windows"))
+        if (!other.contains("execution_sample") && other.at("epoch")==window.at("epoch") &&
+            other.at("start_ns").get<Ns>()<=window.at("end_ns").get<Ns>() &&
+            other.at("end_ns").get<Ns>()>=window.at("start_ns").get<Ns>())
+          throw std::runtime_error("sample overlaps incident capture; excluded from ordinary-operation pool");
+      fs::remove_all(temporary);
+      const auto exported=export_window(session,window,temporary);
+      const auto path=directory/(id+".mcap");
+      fs::rename(exported,path);
+      fs::remove_all(temporary);
+      atomic_json(directory/(id+".json"),{{"schema_version",1},{"kind","execution_sample"},
+        {"sample_id",id},{"session_id",meta.at("session_id")},{"window",window},
+        {"sha256",file_hash(path)},{"size_bytes",fs::file_size(path)},
+        {"label_status","unlabeled"},{"training_eligible",false},
+        {"binding_hash",digest(meta.at("config"))}});
+      try {record_event("execution_sampling","spooled","success",{{"sample_id",id}});}
+      catch(const std::exception &) {} // A logging error cannot delete a committed sample.
+    } catch (const std::exception &error) {
+      fs::remove_all(temporary);
+      fs::remove(directory/(id+".mcap"));
+      atomic_json(directory/(id+".rejected.json"),{{"reason",error.what()},{"sample_id",id}});
+      record_event("execution_sampling","rejected","failure",{{"sample_id",id},{"reason",error.what()}});
+    }
+  }
+}
+
+unsigned upload_execution_samples(const fs::path &store,const Json &config,const std::string &profile,
+                                  const DeviceCredentials &credentials) {
+  const auto directory=store/"execution-samples";
+  if (!fs::is_directory(directory)) return 0;
+  unsigned uploaded=0;
+  for (const auto &entry:fs::directory_iterator(directory)) {
+    const auto filename=entry.path().filename().string();
+    if (!std::regex_match(filename,std::regex("sample-[A-Za-z0-9-]+\\.json"))) continue;
+    const auto stem=entry.path().stem().string();
+    if (fs::exists(directory/(stem+".submitted.json"))) continue;
+    const auto sample=read_json(entry.path());
+    if (sample.value("kind","")!="execution_sample" || sample.at("binding_hash")!=digest(config)) continue;
+    const auto id=sample.at("sample_id").get<std::string>();
+    const auto submitted=directory/(id+".submitted.json");
+    if (fs::exists(submitted)) continue;
+    const auto retry_path=directory/(id+".retry.json");
+    auto retry=fs::exists(retry_path)?read_json(retry_path):Json{{"attempts",0}};
+    if (retry.value("next_retry_wall_ns",Ns{0})>wall_ns()) continue;
+    const auto attempts=retry.value("attempts",0U)+1U;
+    try {
+    const auto path=directory/(id+".mcap");
+    require(fs::is_regular_file(path) && fs::file_size(path)==sample.at("size_bytes").get<std::uintmax_t>() &&
+            file_hash(path)==sample.at("sha256").get<std::string>(),"sample MCAP missing or changed");
+    Json modalities=Json::array();
+    const auto &window=sample.at("window");
+    for (const auto &topic:config.at("topics")) {
+      const auto name=topic.at("name").get<std::string>();
+      const auto count=window.at("coverage").value(name,Json::object()).value("valid_count",0);
+      if (count==0) continue;
+      modalities.push_back({{"modality_key",digest({topic.at("name"),topic.at("type")})},
+        {"kind",modality_kind(topic)},{"topic",name},{"ros2_type",topic.at("type")},
+        {"message_encoding","cdr"},{"schema_encoding","ros2msg"},{"fields",Json::array()},{"entities",Json::array()},
+        {"metadata",{{"role",topic.value("role","custom")}}},{"message_count",count},
+        {"start_time_ns",window.at("start_ns")},{"end_time_ns",window.at("end_ns")}});
+    }
+    const auto recording=digest({{"profile_id",profile},{"sample_id",id},{"sha256",sample.at("sha256")}});
+    const Json payload={{"device_id",credentials.device_id},{"profile_id",profile},{"recording_id",recording},
+      {"sha256",sample.at("sha256")},{"size_bytes",sample.at("size_bytes")},
+      {"start_time_ns",window.at("start_ns")},{"end_time_ns",window.at("end_ns")},{"modalities",modalities},
+      {"manifest",sample}};
+    bool complete=false;
+    if (attempts>1) {
+      try {backend_request(credentials,"/harness-profiles/edge/recordings/complete",payload);complete=true;}
+      catch (const std::exception &) {}
+    }
+    atomic_json(retry_path,{{"attempts",attempts},{"next_retry_wall_ns",wall_ns()+recording_retry_delay_ns(attempts)}});
+    if (!complete) {
+      const auto grant=backend_request(credentials,"/harness-profiles/edge/recordings/upload",payload);
+      put_file(path,grant);
+      backend_request(credentials,"/harness-profiles/edge/recordings/complete",payload);
+    }
+    atomic_json(submitted,{{"recording_id",recording},{"submitted_wall_ns",wall_ns()},{"status","submitted_for_verification"}});
+    ++uploaded;
+    } catch (const std::exception &error) {
+      atomic_json(retry_path,{{"attempts",attempts},{"next_retry_wall_ns",wall_ns()+recording_retry_delay_ns(attempts)},
+                             {"error",error.what()}});
+      record_event("execution_sampling","upload_retry","failure",{{"sample_id",id},{"attempts",attempts}});
+    }
+  }
+  return uploaded;
+}
+
 Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
                               const Json &snapshot,
                               const std::string &session_id) {
+  if (recording.contains("retired_wall_ns") && recording.at("segments").empty() && !fs::exists(session/"rosbag2"))
+    return {{"pre_roll_retired",true},{"already_retired",true}};
   const auto state_path = session / "state.json";
   if (!fs::is_regular_file(state_path))
     return {{"pre_roll_retired", false}, {"reason", "session state missing"}};
@@ -172,6 +289,7 @@ Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
     return {{"pre_roll_retired", false}, {"reason", "observer active"}};
 
   for (const auto &window : observation.value("windows", Json::array())) {
+    if (window.contains("execution_sample")) continue; // Spooling ran before retirement; never a workflow candidate.
     if (window.value("status", "") == "collecting")
       return {{"pre_roll_retired", false},
               {"reason", "incident window still requires export"}};
@@ -217,7 +335,7 @@ Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
 } // namespace
 
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
-                              const DeviceCredentials &credentials) {
+                              const DeviceCredentials &credentials, bool include_execution_samples) {
   const auto recording_path = session / "recording.json";
   const auto session_path = session / "session.json";
   if (!fs::is_regular_file(recording_path) || !fs::is_regular_file(session_path))
@@ -231,6 +349,7 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
   const auto config = session_meta.at("config");
   const auto snapshot = Store(store).snapshot();
   const auto profile_id = snapshot.at("profile_id").get<std::string>();
+  spool_execution_samples(store,session,session_meta);
   // Retention is local policy, not an upload acknowledgement policy. Retire
   // inactive flight-recorder chunks before any network request so a cloud or
   // profile failure can never grow the pre-roll into an archive again.
@@ -258,6 +377,7 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
     const auto sha = evidence.at("sha256").get<std::string>();
     const auto relative = "incident/" + it.key() + ".mcap";
     if (uploaded.contains(relative)) continue;
+    if (state["operations"].contains(relative) && state["operations"][relative].value("next_retry_wall_ns",Ns{0})>wall_ns()) continue;
     const auto file = store / "artifacts" / sha;
     require(fs::is_regular_file(file) && file_hash(file) == sha,
             "incident evidence artifact is missing or corrupt");
@@ -301,7 +421,7 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
                {"sha256", sha}, {"size_bytes", fs::file_size(file)},
                {"local_path", file.string()}, {"last_error", nullptr}});
       bool already_complete = false;
-      try {
+      if (previous_attempts>0) try {
         backend_request(credentials, "/harness-profiles/edge/recordings/complete", payload);
         already_complete = true;
       } catch (const std::exception &) {
@@ -319,18 +439,23 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
       journal(state_path, state, relative, "submitted");
     } catch (const std::exception &error) {
       journal(state_path, state, relative, "retrying",
-              {{"last_error", error.what()}});
+              {{"last_error", error.what()},
+               {"next_retry_wall_ns",wall_ns()+recording_retry_delay_ns(upload_attempts(state,relative))}});
       throw;
     }
     uploaded.insert(relative);
     ++count;
   }
-  return {{"uploaded", count},
-          {"incident_artifacts_only", true},
+  const auto samples=include_execution_samples?upload_execution_samples(store,config,profile_id,credentials):0U;
+  return {{"uploaded", count+samples},{"incident_artifacts",count},{"execution_samples",samples},
+          {"incident_artifacts_only", false},
           {"pre_roll", retired}};
 }
 
 Json run_recording_uploader(const Options &options) {
+  // Export, hashing and TLS are background work; don't compete equally with
+  // robot observation/inference when the edge CPU is busy.
+  (void)::setpriority(PRIO_PROCESS,0,10);
   options.allow("--store --session --sessions-root --credentials --backend-url --interval-ms");
   const auto store = options.path("--store");
   require(options.values.contains("--session") != options.values.contains("--sessions-root"),
@@ -357,9 +482,15 @@ Json run_recording_uploader(const Options &options) {
       for (const auto &entry : fs::directory_iterator(sessions_root))
         if (entry.is_directory()) sessions.push_back(entry.path());
     std::sort(sessions.rbegin(), sessions.rend());
+    std::set<std::string> sample_bindings;
     for (const auto &candidate : sessions) {
       try {
-        const auto result = upload_closed_recordings(store, candidate, credentials);
+        if (!fs::is_regular_file(candidate/"session.json")) continue;
+        const auto meta=read_json(candidate/"session.json");
+        const auto binding=digest(meta.at("config"));
+        const bool samples=!sample_bindings.contains(binding);
+        const auto result = upload_closed_recordings(store, candidate, credentials, samples);
+        if (!result.contains("skipped")) sample_bindings.insert(binding);
         if (result.value("uploaded", 0U) > 0)
           record_event("recording_uploader", "submitted", "success",
                        {{"session", candidate.string()}, {"result", result}});

@@ -63,11 +63,17 @@ jobs:
       - name: Isolation check
         run: ./scripts/isolation_check.sh
 
+      - name: Install pinned native model runtime
+        run: |
+          python3 scripts/fetch_onnxruntime.py --destination "${RUNNER_TEMP}/onnxruntime"
+          echo "ONNXRUNTIME_ROOT=${RUNNER_TEMP}/onnxruntime" >> "${GITHUB_ENV}"
+          echo "HARNESS_WITH_ONNX=ON" >> "${GITHUB_ENV}"
+
       - name: Build, test, package
         run: |
           source /opt/ros/jazzy/setup.bash
           build_log="${RUNNER_TEMP}/rearguard-release-build.log"
-          if ! HARNESS_WITH_ROS2=ON ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}" >"${build_log}" 2>&1; then
+          if ! HARNESS_WITH_ROS2=ON HARNESS_WITH_ONNX=ON ./scripts/build_artifact.sh "${GITHUB_REF_NAME#v}" >"${build_log}" 2>&1; then
             cat "${build_log}"
             grep -E 'FAILED:|fatal error:|error:|CMake Error|tests failed|ninja: build stopped' "${build_log}" |
               tail -20 |

@@ -359,7 +359,11 @@
       }
     }
   },
+  "account_actions": {
+    "get_account_billing": { "description": "Show the authenticated user's preformatted billing summary without changing the harness workflow.", "handler": "get_account_billing", "artifacts": ["account_billing"] }
+  },
   "handlers": {
+    "get_account_billing": { "kind": "read", "description": "Read only the authenticated account's plan, usage, balance, and billing management availability. Never explain or invent charges.", "requires": ["authorization.user"] },
     "browse_propositions": {"kind": "read", "description": "Suggest library templates or list saved profile propositions.", "requires": ["domain.profile_id"]},
     "add_proposition": {"kind": "capture", "description": "Add a library template by its exact ID. Value must be the template ID.", "requires": ["domain.profile_id"]},
     "update_proposition": {"kind": "capture", "description": "Edit a saved proposition. Value is JSON with id and only user-specified boundary, recovery, unknown_response, reentry, or context fields.", "requires": ["domain.profile_id"]},
@@ -410,6 +414,7 @@
     "unavailable": { "kind": "input_gate", "description": "Report that a declared product capability is not implemented.", "requires": [] }
   },
   "artifacts": {
+    "account_billing": { "label": "Billing", "renderer": "billing_card", "surface": "chat" },
     "proposition_library": {"label": "Suggested failure propositions", "renderer": "proposition_library", "surface": "chat"},
     "profile_propositions": {"label": "Your failure propositions", "renderer": "profile_propositions", "surface": "chat"},
     "proposition_input_required": {"label": "Proposition details required", "renderer": "notice", "surface": "chat"},

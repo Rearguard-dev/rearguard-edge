@@ -1,4 +1,5 @@
 #include "critic.hpp"
+#include "physical.hpp"
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -16,6 +17,44 @@ int main(int argc, char **argv) {
     }
     const std::string command = argv[1];
     const fs::path bundle = argv[2];
+    if (command=="physical-pixels") {
+      require(argc==6,"physical-pixels INPUT_RGB WIDTH HEIGHT OUTPUT_F32");
+      const auto w=std::stoull(argv[3]),h=std::stoull(argv[4]);
+      require(w>0 && h>0 && w<=16384 && h<=16384 && w*h<=16777216 && fs::file_size(bundle)==w*h*3,"invalid RGB fixture");
+      std::vector<std::uint8_t> rgb(w*h*3);std::ifstream source(bundle,std::ios::binary);
+      source.read(reinterpret_cast<char *>(rgb.data()),static_cast<std::streamsize>(rgb.size()));require(source.good(),"cannot read RGB fixture");
+      std::vector<float> pixels(3*224*224);physical_pixels(rgb,w,h,pixels);
+      require(!fs::exists(argv[5]),"pixel output already exists");std::ofstream output(argv[5],std::ios::binary);
+      output.write(reinterpret_cast<const char *>(pixels.data()),static_cast<std::streamsize>(pixels.size()*sizeof(float)));
+      require(output.good(),"cannot retain pixel fixture");return 0;
+    }
+    if (command=="physical-verify") {
+      const auto manifest=harness::observation::read_json(bundle/"manifest.json");Json graphs=Json::object();
+      require(manifest.value("tensor_contract_version",0)==2 && manifest.value("trained",false),"trained physical v2 model required");
+      for(const auto *name:{"vision","sensor","embodiment","fusion","decision"}) {
+        PhysicalGraph graph(bundle,manifest.at("graphs").at(name));const auto begin=std::chrono::steady_clock::now();
+        const auto &out=graph.run();graphs[name]={{"output_elements",out.values.size()},
+          {"warmup_ms",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count()}};
+      }
+      std::cout<<Json{{"status","loaded"},{"tensor_contract_version",2},{"graphs",graphs},{"deployment_validated",false}}.dump(2)<<'\n';return 0;
+    }
+    if (command=="physical-fixture") {
+      require(argc==5,"physical-fixture BUNDLE INPUT_JSON OUTPUT_JSON");
+      const auto input=harness::observation::read_json(argv[3]);PhysicalModel model(bundle,input.at("binding"),input.at("selection"));Json outputs=Json::array();
+      for(const auto &sample:input.at("samples")) {
+        for(const auto &state:sample.value("states",Json::array()))model.state(state.at("source"),state.at("available"),state.at("values").get<std::vector<float>>(),state.at("known").get<std::vector<float>>());
+        for(const auto &event:sample.value("commands",Json::array()))model.command(event.at("available"),event.at("values").get<std::vector<double>>());
+        for(const auto &camera:sample.value("cameras",Json::array())) {
+          const auto w=camera.at("width").get<std::size_t>(),h=camera.at("height").get<std::size_t>();
+          require(w>0 && h>0 && w*h<=16777216,"invalid physical fixture image");
+          const auto path=camera.at("path").get<std::string>();require(fs::file_size(path)==w*h*3,"invalid physical fixture size");
+          std::vector<std::uint8_t> rgb(w*h*3);std::ifstream image(path,std::ios::binary);image.read(reinterpret_cast<char *>(rgb.data()),static_cast<std::streamsize>(rgb.size()));
+          model.camera(camera.at("index"),camera.at("source"),camera.at("available"),rgb,w,h);
+        }
+        outputs.push_back(model.score(sample.at("anchor"),0));
+      }
+      harness::observation::atomic_json(argv[4],{{"outputs",outputs},{"last_inputs",model.debug_inputs()}});return 0;
+    }
     if (command == "inspect") {
       std::cout << harness::observation::read_json(bundle / "manifest.json").dump(2) << '\n';
       return 0;
