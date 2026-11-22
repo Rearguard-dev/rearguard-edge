@@ -324,14 +324,13 @@ if(HARNESS_WITH_ROS2)
   target_link_libraries(harness_tiny_critic PRIVATE ${TURBOJPEG_LIBRARY})
   target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_ros.cpp src/tiny_critic/jpeg.cpp src/tiny_critic/physical_ros.cpp)
   target_link_libraries(harness_tiny_critic PRIVATE geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
-  # ros.cpp calls make_learned_critic(), implemented in replay_ros.cpp. Declare
-  # the reverse static-library dependency so CMake repeats the archive cycle
-  # (observation -> tiny_critic -> observation) for one-pass ELF linkers.
-  # Executable-level link order alone fails for observation-only consumers.
-  target_link_libraries(harness_observation PRIVATE harness_tiny_critic)
 else()
   target_sources(harness_tiny_critic PRIVATE src/tiny_critic/replay_unavailable.cpp)
 endif()
+# sync.cpp calls make_physical_critic() even without ROS; ros.cpp also calls
+# make_learned_critic(). Declare the actual reverse dependency in both builds
+# so CMake repeats the static archives for one-pass ELF linkers.
+target_link_libraries(harness_observation PRIVATE harness_tiny_critic)
 add_executable(harness_critic src/tiny_critic/main.cpp)
 target_link_libraries(harness_critic PRIVATE harness_tiny_critic harness_flags)
 target_link_libraries(harness_cli PRIVATE harness_tiny_critic)
