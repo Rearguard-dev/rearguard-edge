@@ -19,6 +19,15 @@ bool valid(const std::vector<double> &a) {
   return !a.empty() && std::all_of(a.begin(),a.end(),[](double x){return std::isfinite(x);});
 }
 }
+bool unconfirmed_critic_window(const Json &window,const Json &snapshot) {
+  const auto detection=window.value("detection",Json::object());
+  if (detection.value("source","")!="experimental_critic" ||
+      detection.value("deployment_validated",false)) return false;
+  for (const auto &candidate:snapshot.value("candidates",Json::object()))
+    if (candidate.value("status","")=="accepted_failure" &&
+        candidate.value("window",Json::object()).value("id","")==window.value("id","")) return false;
+  return true;
+}
 ExecutionSampler::ExecutionSampler(fs::path root, unsigned seed):root_(std::move(root)),random_(seed) {
   policy_={{"schema_version",1},{"enabled",true},{"mean_interval_s",30.},
     {"joint_delta",.01},{"daily_limit",12},{"bootstrap_limit",40},{"failure_ratio",3},
@@ -93,7 +102,7 @@ std::optional<Json> ExecutionSampler::select(Ns ros,Ns now,Ns wall,const Json &s
   if (eligible_s_<next_s_ || ros<15*second || (last_end_>=0 && ros-15*second<last_end_)) return std::nullopt;
   next();
   for (const auto &w:observation.at("windows"))
-    if (w.at("epoch")==observation.at("epoch") &&
+    if (!unconfirmed_critic_window(w,snapshot) && w.at("epoch")==observation.at("epoch") &&
         w.at("start_ns").get<Ns>()<=ros && w.at("end_ns").get<Ns>()>=ros-15*second) return std::nullopt;
   std::set<std::string> failures;
   for (const auto &f:snapshot.at("failures")) {

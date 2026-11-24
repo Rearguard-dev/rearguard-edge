@@ -90,20 +90,25 @@ needs explicit pinning and a catalog-aware cleanup operation in a later update.
 ## Export and catalog
 
 Selected windows carry `execution_sample` metadata in session `state.json`.
-They bypass workflow candidate creation. The uploader spools ready samples before
-its network calls, to `execution-samples/<sample-id>.mcap` under the profile
+They bypass workflow candidate creation. A local worker in the uploader process
+spools ready samples independently of network calls, to `execution-samples/<sample-id>.mcap` under the profile
 store. A paired JSON manifest records session/window, selection reason, policy,
-binding/context, SHA256 and size. Incident overlap known before export rejects
-the sample. A later unreported/reported incident does not automatically rewrite
+binding/context, SHA256 and size. Operator-reported or accepted-failure overlap known before export rejects
+the sample. Unvalidated experimental critic alerts do not block selection or
+export: `unconfirmed_alert_overlaps` retains their detection metadata for review.
+These samples remain unlabeled and ineligible for training until reviewed. A later unreported/reported incident does not automatically rewrite
 an already uploaded sample's catalog metadata: all samples remain unlabeled.
 
 Upload uses the same authenticated immutable object grants, completion endpoint
 and asynchronous verification/catalog as incident evidence. Retries reuse the
 same recording identity and content hash. Completion markers say submitted for
-verification, not verified. Network work and MCAP export happen in the existing
-uploader process, outside the observer/safety loop. Incident uploads retain
-priority. If the uploader is blocked long enough that selected pre-roll expires,
-that sample is rejected; it is not substituted with a newer recording.
+verification, not verified. Network work and MCAP export happen on independent workers in the existing
+uploader process, outside the observer/safety loop. The local worker polls at
+500 ms, skips unchanged session state, and takes a profile-wide export lock.
+A blocked upload does not prevent local export. Disk/CPU failures can still delay
+export; unavailable pre-roll is rejected rather than replaced by another interval.
+The worker reads the full workflow snapshot only when a sample actually needs
+export, rather than on every observation heartbeat.
 
 The existing generic recording catalog accepts `manifest.kind=execution_sample`;
 no database migration is required. Incident-specific automatic preview jobs and
@@ -164,11 +169,9 @@ stored as received; no additional camera re-encoding was added. Compression
 options for raw image topics and resumable multipart upload need measurement
 before changing their defaults. Current ordinary samples are capped at 64 MiB.
 
-MCAP export and HTTP still share one supervised uploader process. A long blocked
-network request can delay spooling a newly selected window until its pre-roll
-expires, resulting in explicit rejection. Separating export scheduling from
-network I/O remains a larger follow-up; connection reuse/backoff do not eliminate
-that limitation. Real throughput and observer latency have not been benchmarked.
+MCAP export and HTTP share one supervised uploader process but now run on
+independent workers. This addresses network-induced pre-roll expiry; real
+throughput and observer latency have not been benchmarked.
 
 The localhost HTTP test uses synthetic bytes/credentials and checks fresh request
 order, durable retry suppression, completion-only recovery after an interrupted
@@ -196,11 +199,38 @@ checks the first-attempt request sequence, lost-completion reconciliation withou
 a second PUT, persisted backoff, completed skips, and two reused HTTP connections
 (one API, one object transfer). It does not benchmark the real uplink or cloud.
 Zenoh is not introduced: ROS transport and immutable MCAP transfer remain separate
-layers. A long blocked PUT can still delay the next spool pass; separate export
-and network scheduling and multipart resume are future work, not certified here.
+layers. Local export scheduling is now independent of PUT progress; resumable
+multipart upload remains future work.
 
 Efficiency validation on 2026-11-21: the ROS-enabled CLI compiled; all four
 observation/sampler/MCAP/HTTP CTest targets passed (36.30 seconds). After the final
 queue-scan guard adjustment, the CLI and HTTP fixture rebuilt and the HTTP test
 passed again (1.95 seconds). Tests ran in the isolated Linux cache; no installed
 service, real recording, cloud account or robot execution was changed.
+
+
+## Local preservation and completed queue cleanup (2026-11-24)
+
+The supervised uploader starts a local-only sample worker before draining HTTP
+transfers. That worker does not call the backend or wait for incident uploads.
+`ready` in observer state means the interval ended, not that an MCAP is durable.
+A sample manifest plus MCAP means locally saved; `.submitted.json` means accepted
+for asynchronous cloud verification, not already verified. `.rejected.json`
+contains a terminal local-export reason. Gap checks and byte limits are unchanged.
+
+On the first visit to each session after uploader startup, completed transfer
+journal entries are compacted to `{"status":"submitted"}` tombstones. The full
+original journal is archived under a content-hashed `.before-compaction-*.json`
+name before replacement. Pending/retrying entries remain unchanged, acknowledgements
+are never deleted, and subsequent runs cannot reupload completed recordings.
+No recording artifacts, workflow candidates or cloud records are deleted. This
+cleanup runs with the updated uploader, not as a competing editor of live journals.
+
+Validation on 2026-11-24: the ROS-enabled CLI rebuilt in the isolated Linux cache;
+all four observation/sampler/offline-MCAP/loopback-HTTP targets passed (42.63 s).
+The HTTP mock withheld a grant response until the independent local worker
+processed a newly appearing window. Offline MCAP checks confirmed durable export
+with unvalidated-alert overlap metadata, continued exclusion of operator incidents,
+and unchanged coverage/byte guards. Queue tests checked archived originals,
+preserved completion tombstones and retries, idempotent compaction, and retirement
+waiting for local export. No installed service or cloud data was changed.

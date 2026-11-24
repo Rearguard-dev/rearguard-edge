@@ -28,6 +28,8 @@ public:
                              const Json &observation);
   Json status() const;
 };
+// Unvalidated experimental alerts are review context, not confirmed incidents.
+bool unconfirmed_critic_window(const Json &window, const Json &snapshot);
 // Strict receipt-clock coverage. Header stamps remain in the MCAP unchanged.
 bool sample_coverage(const Json &binding, const Json &coverage, Ns start, Ns end);
 } // namespace harness::observation

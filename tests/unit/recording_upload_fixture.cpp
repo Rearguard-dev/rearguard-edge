@@ -36,6 +36,39 @@ int main(int argc,char **argv) {
     require(upload_closed_recordings(store.root,session,credentials)["execution_samples"]==1,"completion reconciliation failed");
     require(recording_retry_delay_ns(1)==5000000000LL && recording_retry_delay_ns(2)==10000000000LL &&
             recording_retry_delay_ns(1000)==300000000000LL,"retry bounds");
+    // The mock holds the HTTP grant until the local worker processes a window
+    // which appears after the request starts. No real MCAP/credentials involved.
+    sample("sample-blocked");
+    auto blocked=read_json(directory/"sample-blocked.json");
+    blocked["test_state_path"]=(session/"state.json").string();
+    blocked["test_marker_path"]=(directory/"sample-local-blocked.rejected.json").string();
+    atomic_json(directory/"sample-blocked.json",blocked);
+    {
+      ExecutionSampleSpooler spooler(store.root,root);
+      require(upload_closed_recordings(store.root,session,credentials,true,false)["execution_samples"]==1,
+              "blocked network prevented local work");
+      require(fs::exists(directory/"sample-local-blocked.rejected.json"),"local worker did not run during blocked HTTP");
+    }
+    // Inactive pre-roll cannot be retired ahead of the independent local worker.
+    fs::create_directories(session/"rosbag2");
+    atomic_json(session/"state.json",{{"status","stopped"},{"windows",Json::array({
+      {{"execution_sample",{{"id","sample-not-yet-spooled"}}},{"status","ready"}}})}});
+    const auto waiting=upload_closed_recordings(store.root,session,credentials,false,false);
+    require(waiting["pre_roll"]["pre_roll_retired"]==false && fs::exists(session/"rosbag2"),"retirement raced local export");
+    atomic_json(directory/"sample-not-yet-spooled.rejected.json",{{"reason","synthetic expired sample"}});
+    const auto retired=upload_closed_recordings(store.root,session,credentials,false,false);
+    require(retired["pre_roll"]["pre_roll_retired"]==true && !fs::exists(session/"rosbag2"),"terminal sample blocks retirement");
+    const auto journal=session/"cloud-recordings.json";
+    atomic_json(journal,{{"schema_version",2},{"operations",{
+      {"incident/done.mcap",{{"status","submitted"},{"object_key","synthetic"},{"attempts",2}}},
+      {"incident/pending.mcap",{{"status","retrying"},{"attempts",3},{"next_retry_wall_ns",123}}}}}});
+    const auto before=read_json(journal);
+    require(compact_recording_journal(journal),"completed journal not compacted");
+    const auto compacted=read_json(journal);
+    require(compacted["operations"]["incident/done.mcap"]==Json{{"status","submitted"}},"completion acknowledgement lost");
+    require(compacted["operations"]["incident/pending.mcap"]==before["operations"]["incident/pending.mcap"],"pending transfer changed");
+    require(read_json(fs::path(journal.string()+".before-compaction-"+digest(before)+".json"))==before,"original journal not archived");
+    require(!compact_recording_journal(journal),"compaction not idempotent");
     fs::remove_all(root);std::cout<<"Transport fixture passed\n";return 0;
   }catch(const std::exception &e){fs::remove_all(root);std::cerr<<e.what()<<'\n';return 1;}
 }

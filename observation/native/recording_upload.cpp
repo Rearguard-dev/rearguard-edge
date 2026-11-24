@@ -12,6 +12,9 @@
 #include <regex>
 #include <thread>
 #include <sys/resource.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 namespace harness::observation {
 Ns recording_retry_delay_ns(unsigned attempts) {
@@ -168,9 +171,7 @@ std::uintmax_t directory_bytes(const fs::path &directory) {
 
 // Spool selected windows before any network call. Unavailable pre-roll is
 // rejected, never replaced by a different interval or called a negative.
-void spool_execution_samples(const fs::path &store,const fs::path &session,const Json &meta) {
-  if (!fs::is_regular_file(session/"state.json")) return;
-  const auto observation=read_json(session/"state.json");
+void spool_execution_samples_unlocked(const fs::path &store,const fs::path &session,const Json &meta,const Json &snapshot,const Json &observation) {
   const auto directory=store/"execution-samples";
   fs::create_directories(directory);
   for (const auto &window:observation.value("windows",Json::array())) {
@@ -181,11 +182,15 @@ void spool_execution_samples(const fs::path &store,const fs::path &session,const
     if (fs::exists(directory/(id+".json")) || fs::exists(directory/(id+".rejected.json"))) continue;
     const auto temporary=directory/(id+".export");
     try {
+      Json overlaps=Json::array();
       for (const auto &other:observation.at("windows"))
         if (!other.contains("execution_sample") && other.at("epoch")==window.at("epoch") &&
             other.at("start_ns").get<Ns>()<=window.at("end_ns").get<Ns>() &&
-            other.at("end_ns").get<Ns>()>=window.at("start_ns").get<Ns>())
-          throw std::runtime_error("sample overlaps incident capture; excluded from ordinary-operation pool");
+            other.at("end_ns").get<Ns>()>=window.at("start_ns").get<Ns>()) {
+          require(unconfirmed_critic_window(other,snapshot),
+                  "sample overlaps reported or confirmed incident; excluded from ordinary-operation pool");
+          overlaps.push_back({{"window_id",other.at("id")},{"detection",other.at("detection")}});
+        }
       fs::remove_all(temporary);
       const auto exported=export_window(session,window,temporary);
       const auto path=directory/(id+".mcap");
@@ -195,7 +200,7 @@ void spool_execution_samples(const fs::path &store,const fs::path &session,const
         {"sample_id",id},{"session_id",meta.at("session_id")},{"window",window},
         {"sha256",file_hash(path)},{"size_bytes",fs::file_size(path)},
         {"label_status","unlabeled"},{"training_eligible",false},
-        {"binding_hash",digest(meta.at("config"))}});
+        {"binding_hash",digest(meta.at("config"))},{"unconfirmed_alert_overlaps",overlaps}});
       try {record_event("execution_sampling","spooled","success",{{"sample_id",id}});}
       catch(const std::exception &) {} // A logging error cannot delete a committed sample.
     } catch (const std::exception &error) {
@@ -269,7 +274,7 @@ unsigned upload_execution_samples(const fs::path &store,const Json &config,const
   return uploaded;
 }
 
-Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
+Json retire_inactive_pre_roll(const fs::path &store, const fs::path &session, const Json &recording,
                               const Json &snapshot,
                               const std::string &session_id) {
   if (recording.contains("retired_wall_ns") && recording.at("segments").empty() && !fs::exists(session/"rosbag2"))
@@ -289,7 +294,14 @@ Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
     return {{"pre_roll_retired", false}, {"reason", "observer active"}};
 
   for (const auto &window : observation.value("windows", Json::array())) {
-    if (window.contains("execution_sample")) continue; // Spooling ran before retirement; never a workflow candidate.
+    if (window.contains("execution_sample")) {
+      const auto id=window.at("execution_sample").at("id").get<std::string>();
+      require(std::regex_match(id,std::regex("sample-[A-Za-z0-9-]+")),"invalid execution sample identity");
+      const auto directory=store/"execution-samples";
+      if (!fs::exists(directory/(id+".json")) && !fs::exists(directory/(id+".rejected.json")))
+        return {{"pre_roll_retired",false},{"reason","execution sample still requires local export"}};
+      continue;
+    }
     if (window.value("status", "") == "collecting")
       return {{"pre_roll_retired", false},
               {"reason", "incident window still requires export"}};
@@ -334,8 +346,76 @@ Json retire_inactive_pre_roll(const fs::path &session, const Json &recording,
 
 } // namespace
 
+bool compact_recording_journal(const fs::path &path) {
+  if (!fs::is_regular_file(path)) return false;
+  const auto original=read_json(path);
+  auto state=load_state(path);
+  bool changed=false;
+  for (auto &operation:state["operations"])
+    if (operation.value("status","")=="submitted" && operation.size()>1) {
+      operation={{"status","submitted"}};changed=true;
+    }
+  if (!changed) return false;
+  // Archive once before replacement. Pending/retrying operations are untouched;
+  // submitted tombstones stay in the active journal to prohibit retransmission.
+  const auto archive=fs::path(path.string()+".before-compaction-"+digest(original)+".json");
+  if (!fs::exists(archive)) atomic_json(archive,original);
+  atomic_json(path,state);
+  return true;
+}
+
+void spool_execution_samples(const fs::path &store,const fs::path &session) {
+  if (!fs::is_regular_file(session/"session.json") || !fs::is_regular_file(session/"state.json")) return;
+  const auto meta=read_json(session/"session.json");
+  if (!meta.contains("workflow_store") || !meta["workflow_store"].is_string() ||
+      fs::weakly_canonical(meta["workflow_store"].get<std::string>())!=fs::weakly_canonical(store)) return;
+  const auto observation=read_json(session/"state.json");
+  bool pending=false;
+  for (const auto &window:observation.value("windows",Json::array())) {
+    if (!window.contains("execution_sample") || window.value("status","")!="ready") continue;
+    const auto id=window.at("execution_sample").at("id").get<std::string>();
+    require(std::regex_match(id,std::regex("sample-[A-Za-z0-9-]+")),"invalid execution sample identity");
+    const auto directory=store/"execution-samples";
+    if (!fs::exists(directory/(id+".json")) && !fs::exists(directory/(id+".rejected.json"))) pending=true;
+  }
+  if (!pending) return; // Don't read a multi-MB profile snapshot on every heartbeat.
+  const auto fd=::open((store/"execution-spool.lock").c_str(),O_CREAT|O_RDWR|O_CLOEXEC,0600);
+  require(fd>=0,"cannot open execution spool lock");
+  if (::flock(fd,LOCK_EX|LOCK_NB)!=0) {::close(fd);throw std::runtime_error("execution spool busy");}
+  try {
+    spool_execution_samples_unlocked(store,session,meta,Store(store).snapshot(),observation);
+  } catch (...) {::close(fd);throw;}
+  ::close(fd);
+}
+
+ExecutionSampleSpooler::ExecutionSampleSpooler(fs::path store,fs::path sessions_root)
+  :worker_([store=std::move(store),sessions_root=std::move(sessions_root)](std::stop_token stop) {
+    std::map<fs::path,fs::file_time_type> processed;
+    while (!stop.stop_requested()) {
+      try {
+        if (fs::is_directory(sessions_root)) for (const auto &entry:fs::directory_iterator(sessions_root)) {
+          if (stop.stop_requested()) break;
+          const auto state=entry.path()/"state.json";
+          if (!entry.is_directory() || !fs::is_regular_file(state)) continue;
+          const auto modified=fs::last_write_time(state);
+          if (processed.contains(state) && processed.at(state)==modified) continue;
+          try {
+            spool_execution_samples(store,entry.path());
+            processed[state]=modified;
+          } catch (const std::exception &error) {
+            record_event("execution_sampling","spool_retry","failure",{{"session",entry.path().string()},{"message",error.what()}});
+          }
+        }
+      } catch (const std::exception &error) {
+        try {record_event("execution_sampling","spool_scan","failure",{{"message",error.what()}});} catch (...) {}
+      }
+      for (unsigned i=0;i<5 && !stop.stop_requested();++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }) {}
+
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
-                              const DeviceCredentials &credentials, bool include_execution_samples) {
+                              const DeviceCredentials &credentials, bool include_execution_samples, bool spool_local) {
   const auto recording_path = session / "recording.json";
   const auto session_path = session / "session.json";
   if (!fs::is_regular_file(recording_path) || !fs::is_regular_file(session_path))
@@ -349,12 +429,12 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
   const auto config = session_meta.at("config");
   const auto snapshot = Store(store).snapshot();
   const auto profile_id = snapshot.at("profile_id").get<std::string>();
-  spool_execution_samples(store,session,session_meta);
+  if (spool_local) spool_execution_samples(store,session);
   // Retention is local policy, not an upload acknowledgement policy. Retire
   // inactive flight-recorder chunks before any network request so a cloud or
   // profile failure can never grow the pre-roll into an archive again.
   const auto retired = retire_inactive_pre_roll(
-      session, recording, snapshot,
+      store, session, recording, snapshot,
       session_meta.at("session_id").get<std::string>());
   const auto state_path = session / "cloud-recordings.json";
   auto state = load_state(state_path);
@@ -473,8 +553,12 @@ Json run_recording_uploader(const Options &options) {
   require(interval_ms >= 250 && interval_ms <= 60000,
           "interval-ms must be between 250 and 60000");
   uploader_stopping = 0;
+  // Start local preservation independently of the network drain. A 600-second
+  // PUT must never prevent a selected window from leaving the 30-second ring.
+  ExecutionSampleSpooler spooler(store,session.empty()?sessions_root:session.parent_path());
   ::signal(SIGINT, uploader_stop_handler);
   ::signal(SIGTERM, uploader_stop_handler);
+  std::set<fs::path> compacted;
   while (!uploader_stopping) {
     std::vector<fs::path> sessions;
     if (!session.empty()) sessions.push_back(session);
@@ -487,9 +571,15 @@ Json run_recording_uploader(const Options &options) {
       try {
         if (!fs::is_regular_file(candidate/"session.json")) continue;
         const auto meta=read_json(candidate/"session.json");
+        if (!meta.contains("workflow_store") || !meta["workflow_store"].is_string() ||
+            fs::weakly_canonical(meta["workflow_store"].get<std::string>())!=fs::weakly_canonical(store)) continue;
         const auto binding=digest(meta.at("config"));
         const bool samples=!sample_bindings.contains(binding);
-        const auto result = upload_closed_recordings(store, candidate, credentials, samples);
+        if (!compacted.contains(candidate)) {
+          compact_recording_journal(candidate/"cloud-recordings.json");
+          compacted.insert(candidate);
+        }
+        const auto result = upload_closed_recordings(store, candidate, credentials, samples, false);
         if (!result.contains("skipped")) sample_bindings.insert(binding);
         if (result.value("uploaded", 0U) > 0)
           record_event("recording_uploader", "submitted", "success",

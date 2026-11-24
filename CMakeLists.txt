@@ -421,6 +421,8 @@ if(HARNESS_BUILD_TESTS)
   if(HARNESS_WITH_ROS2)
     add_executable(harness_execution_sampling_ros_tests tests/unit/execution_sampling_ros_test.cpp)
     target_link_libraries(harness_execution_sampling_ros_tests PRIVATE harness_observation harness_flags)
+    target_compile_definitions(harness_execution_sampling_ros_tests PRIVATE
+      HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json")
     add_test(NAME harness_execution_sampling_ros_tests COMMAND harness_execution_sampling_ros_tests)
     add_executable(harness_jpeg_tests tests/unit/jpeg_test.cpp src/tiny_critic/jpeg.cpp)
     target_include_directories(harness_jpeg_tests PRIVATE src/tiny_critic ${TURBOJPEG_INCLUDE_DIR})

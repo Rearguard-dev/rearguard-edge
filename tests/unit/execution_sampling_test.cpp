@@ -73,6 +73,13 @@ void incidents_and_labels(){
   Fixture f;ExecutionSampler s(f.root,5);
   auto state=observation();state["windows"].push_back({{"epoch",0},{"start_ns",0},{"end_ns",1000*second}});
   check(!operate(s,120,snapshot(),state),"incident overlap excluded");
+  auto alert=state;
+  alert["windows"][0]["id"]="experimental-window";
+  alert["windows"][0]["detection"]={{"source","experimental_critic"},{"deployment_validated",false}};
+  s.reset();check(operate(s,17,snapshot(),alert).has_value(),"unconfirmed alert cannot suppress collection");
+  auto confirmed=snapshot();confirmed["candidates"]["confirmed"]={{"status","accepted_failure"},{"window",alert["windows"][0]}};
+  check(!unconfirmed_critic_window(alert["windows"][0],confirmed),"accepted failure still blocks ordinary samples");
+  check(unconfirmed_critic_window(alert["windows"][0],snapshot()),"experimental alert is review context");
   s.reset();const auto result=operate(s,120);
   check(result && result->at("label_status")=="unlabeled","no automatic negative labels");
   const auto ledger=read_json(f.root/"execution-sampling-ledger.json");
