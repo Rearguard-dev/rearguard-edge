@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "purpose": "Development targets, not actuator presets or commissioned support",
+  "targets": [
+    {
+      "robot_family": "so101",
+      "robot_model": "so101",
+      "arm_axes": 5,
+      "tool_separate_from_arm": true,
+      "qualification": "adapter_contract_tests",
+      "hardware_validated": false,
+      "driver_requirement": "MoveIt planning plus an exclusive recovery trajectory path; normalized gripper action requires a gap adapter"
+    },
+    {
+      "robot_family": "agilex_piper",
+      "robot_model": "piper",
+      "arm_axes": 6,
+      "tool_separate_from_arm": true,
+      "qualification": "adapter_contract_tests",
+      "hardware_validated": false,
+      "driver_requirement": "Pin ROS driver, firmware and robot description together; gate every direct CAN and ROS command path",
+      "reference": "https://github.com/agilexrobotics/agx_arm_ros/tree/ros2/src/agx_arm_moveit"
+    }
+  ],
+  "nav2": "Optional mobile-base capability with independent authority; absent on these fixed-arm test configurations",
+  "contact_unload": "Disabled until a specific robot/tool contact procedure is qualified"
+}

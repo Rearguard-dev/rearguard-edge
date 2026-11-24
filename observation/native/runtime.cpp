@@ -78,6 +78,8 @@ Json Runtime::snapshot() const {
           {"proposition_id", proposition_id_},
           {"critic_ready", critic_.ready()},
           {"controller_ready", controller_.ready()},
+          {"recovery", controller_.telemetry()},
+          {"recovery_episode_id", recovery_episode_id_},
           {"enforcement_event_id", enforcement_event_id_.empty()
                                        ? Json(nullptr) : Json(enforcement_event_id_)},
           {"recovery_attempt",
@@ -155,12 +157,16 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
     validate_authorization(store_.snapshot());
     if (!fresh || !std::isfinite(now))
       return fallback("observations or clock stale");
+    controller_.observe(observations, now);
     if (status == "recovering") {
       if (observations.epoch != recovery_epoch_)
         return fallback("recovery clock epoch changed");
       if (now >= deadline_)
         return fallback("recovery timeout");
-      const auto outcome = controller_completed_ ? std::string("succeeded") : controller_.poll();
+      // Keep checking ownership while waiting for exit evidence/client readiness.
+      const auto outcome = controller_.poll();
+      if (outcome != "running" && outcome != "succeeded" && outcome != "failed")
+        return fallback("invalid controller response");
       if (outcome == "succeeded") controller_completed_ = true;
       const auto &gate = contract_.at("exit_gate");
       const auto judgment = critic_.evaluate_exit(observations, gate);
@@ -177,7 +183,17 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
           eligible ? judgment.at("t_ns").get<Ns>() : -1, observations.receipt_ros_ns, observations.epoch,
           static_cast<Ns>(gate.at("max_age_ms").get<double>() * 1e6),
           static_cast<Ns>(gate.at("persistence_ms").get<double>() * 1e6));
-      if (controller_completed_ && exit_met) {
+      if (controller_completed_ && exit_met && outcome != "failed") {
+        const auto readiness = controller_.prepare_handback(
+            {{"episode_id", recovery_episode_id_},
+             {"deployment_id", deployment_id_},
+             {"deployment_content_hash", deployment_content_hash_},
+             {"failure_id", failure_id_}, {"proposition_id", proposition_id_}});
+        if (readiness == ControllerAdapter::Handback::pending) return nullptr;
+        if (readiness != ControllerAdapter::Handback::ready)
+          return fallback("handback readiness failed");
+        // Authorization may have changed while an adapter prepared the client.
+        validate_authorization(store_.snapshot());
         if (!controller_.resume())
           return fallback("nominal reentry not acknowledged");
         authority_requested_ = false;
@@ -200,8 +216,6 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
         }
         return fallback("recovery failed");
       }
-      if (outcome != "running" && outcome != "succeeded")
-        return fallback("invalid controller response");
       return nullptr;
     }
     const auto detection = critic_.evaluate(observations);
@@ -220,6 +234,9 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
     const bool rising = match && !last_match_;
     last_match_ = match;
     if (rising) {
+      if (!controller_.can_begin())
+        return fallback("recovery entry not ready or incident not rearmed");
+      recovery_episode_id_ = "episode-" + unique_id();
       authority_requested_ = true;
       if (!controller_.begin())
         return fallback("recovery authority not acknowledged");

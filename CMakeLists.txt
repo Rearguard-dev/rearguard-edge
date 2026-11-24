@@ -228,9 +228,14 @@ else()
   set(HARNESS_SQLITE_TARGET SQLite::SQLite3)
 endif()
 option(HARNESS_WITH_ROS2 "Build native ROS 2 observation and MCAP export (source Jazzy first)" OFF)
+option(HARNESS_WITH_RECOVERY_ROS "Build opt-in MoveIt/Nav2/tool recovery action transport and ROS tests" OFF)
+if(HARNESS_WITH_RECOVERY_ROS AND NOT HARNESS_WITH_ROS2)
+  message(FATAL_ERROR "HARNESS_WITH_RECOVERY_ROS requires HARNESS_WITH_ROS2")
+endif()
 add_library(harness_observation STATIC
   observation/native/common.cpp observation/native/store.cpp
-  observation/native/binding.cpp
+  observation/native/binding.cpp observation/native/recovery_library.cpp
+  observation/native/recovery_adapters.cpp
   observation/native/evidence.cpp observation/native/capture_context.cpp observation/native/runtime.cpp observation/native/sync.cpp
   observation/native/recording_upload.cpp observation/native/execution_sampling.cpp
   observation/native/model_cache.cpp
@@ -259,6 +264,12 @@ if(HARNESS_WITH_ROS2)
   find_package(rosgraph_msgs REQUIRED)
   target_sources(harness_observation PRIVATE observation/native/ros.cpp
     observation/native/recording.cpp observation/native/ros_recovery.cpp)
+  if(HARNESS_WITH_RECOVERY_ROS)
+    find_package(moveit_msgs REQUIRED)
+    find_package(nav2_msgs REQUIRED)
+    target_sources(harness_observation PRIVATE observation/native/ros_recovery_transport.cpp)
+    target_link_libraries(harness_observation PUBLIC ${moveit_msgs_TARGETS} ${nav2_msgs_TARGETS})
+  endif()
   target_link_libraries(harness_observation PUBLIC rclcpp::rclcpp rosbag2_cpp::rosbag2_cpp
     rclcpp_action::rclcpp_action
     ${control_msgs_TARGETS} ${controller_manager_msgs_TARGETS}
@@ -382,6 +393,18 @@ if(HARNESS_BUILD_TESTS)
   target_compile_definitions(harness_observation_tests PRIVATE
     HARNESS_OBSERVATION_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/observation/so101.json")
   add_test(NAME harness_observation_tests COMMAND harness_observation_tests)
+  add_executable(harness_recovery_library_tests tests/unit/recovery_library_test.cpp)
+  target_link_libraries(harness_recovery_library_tests PRIVATE harness_observation harness_flags)
+  add_test(NAME harness_recovery_library_tests COMMAND harness_recovery_library_tests)
+  add_executable(harness_recovery_adapters_tests tests/unit/recovery_adapters_test.cpp)
+  target_link_libraries(harness_recovery_adapters_tests PRIVATE harness_observation harness_flags)
+  add_test(NAME harness_recovery_adapters_tests COMMAND harness_recovery_adapters_tests)
+  if(HARNESS_WITH_RECOVERY_ROS)
+    add_executable(harness_recovery_transport_ros_tests tests/unit/recovery_transport_ros_test.cpp)
+    target_link_libraries(harness_recovery_transport_ros_tests PRIVATE harness_observation harness_flags)
+    add_test(NAME harness_recovery_transport_ros_tests COMMAND harness_recovery_transport_ros_tests)
+    set_tests_properties(harness_recovery_transport_ros_tests PROPERTIES TIMEOUT 45)
+  endif()
   add_executable(harness_execution_sampling_tests tests/unit/execution_sampling_test.cpp)
   target_link_libraries(harness_execution_sampling_tests PRIVATE harness_observation harness_flags)
   add_test(NAME harness_execution_sampling_tests COMMAND harness_execution_sampling_tests)

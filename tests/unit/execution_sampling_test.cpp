@@ -23,6 +23,17 @@ std::optional<Json> operate(ExecutionSampler &s,int seconds,const Json &profile=
   return selected;
 }
 void activity(){
+  // Exercise real defaults: one short operation must not wait minutes for a draw.
+  Fixture prompt;fs::remove(prompt.root/"execution-sampling-policy.json");
+  ExecutionSampler first(prompt.root,5);
+  check(first.status()["next_draw_seconds"]==15.,"first draw is one complete window");
+  check(!operate(first,15),"cannot select before 15 eligible seconds");
+  first.reset();
+  check(operate(first,17).has_value(),"short operation retained with default policy");
+  check(first.status()["next_draw_seconds"].get<double>()>=15. &&
+        first.status()["next_draw_seconds"].get<double>()<=45.,"default subsequent draw bounded");
+  first.reset();
+  check(first.status()["next_draw_seconds"].get<double>()<=45.,"clock reset retains bounded cadence");
   Fixture f;ExecutionSampler s(f.root,5);
   check(!operate(s,120,snapshot(),observation(),false),"stationary joint traffic cannot trigger");
   s.reset();

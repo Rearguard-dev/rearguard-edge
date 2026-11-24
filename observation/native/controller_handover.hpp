@@ -46,6 +46,7 @@ public:
     return true;
   }
   bool begin() override {
+    if (!executor_.can_begin()) return false;
     if (state_ == State::recovering) {
       // Bounded retries retain authority; never switch through nominal.
       return authority_.recovery_owns_commands() && executor_.begin();
@@ -57,25 +58,43 @@ public:
     state_ = State::recovering;
     return true;
   }
+  bool can_begin() const override {
+    return (state_ == State::nominal || state_ == State::recovering) && executor_.can_begin();
+  }
   std::string poll() override {
     if (state_ != State::recovering || !authority_.recovery_owns_commands())
       return "authority_lost";
     return executor_.poll();
   }
+  void observe(const Observations &observations, double now) override {
+    executor_.observe(observations, now);
+  }
+  Handback prepare_handback(const Json &context) override {
+    if (state_ != State::recovering || !authority_.recovery_owns_commands())
+      return Handback::failed;
+    return executor_.prepare_handback(context);
+  }
+  Json telemetry() const override { return executor_.telemetry(); }
   bool resume() override {
     if (state_ != State::recovering || !authority_.recovery_owns_commands()) return false;
     // Executor resume acknowledges completion predicates, discards stale work,
     // and prepares nominal reentry. It must not itself change command ownership.
     if (!executor_.resume()) return false;
+    if (!authority_.recovery_owns_commands()) return false;
     state_ = State::releasing;
     if (!authority_.release() || !authority_.nominal_owns_commands()) return false;
     state_ = State::nominal;
+    executor_.handback_confirmed();
     return true;
   }
   bool hold(const std::string &reason) override {
     if (state_ == State::unprepared || state_ == State::nominal) return false;
     state_ = State::held;
-    return authority_.hold(reason);
+    // Always attempt authority fallback, including when cancellation fails.
+    bool cancelled = false;
+    try { cancelled = executor_.hold(reason); } catch (...) {}
+    const bool held = authority_.hold(reason);
+    return held && cancelled;
   }
 };
 } // namespace harness::observation

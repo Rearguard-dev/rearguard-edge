@@ -16,7 +16,7 @@ Disabling or invalid configuration disables sampling without stopping observatio
 {
   "schema_version": 1,
   "enabled": true,
-  "mean_interval_s": 300,
+  "mean_interval_s": 30,
   "joint_delta": 0.01,
   "daily_limit": 12,
   "bootstrap_limit": 40,
@@ -42,9 +42,23 @@ including stationary pauses long enough to yield a fully stationary 15-second wi
 from mere ROS topic presence. The initial implementation does not allocate
 separate pause/motion quotas or pose-diversity buckets.
 
-A random draw independent of critic scores selects a retrospective 15-second
-window. Intervals are exponential in accumulated eligible wall time, floored at
-15 seconds. Required streams must cover the interval, with no receipt gap or
+The first selection with an empty reservation ledger is due after 15 seconds
+of eligible activity. Subsequent intervals are uniform between 15 seconds and
+`2 * mean_interval_s - 15`: 15–45 seconds with the default mean of 30 seconds.
+This removes the several-minute random tail. Setting `mean_interval_s` to 15
+selects every 15 eligible seconds. Existing explicit policy overrides remain
+in effect; a configured mean of 300 should be lowered for short operations.
+Selections are independent of critic scores and retain retrospective 15-second
+windows without overlap. Inactivity pauses the eligible-time counter; daily,
+pool and pending-byte budgets still apply. A short operation can qualify through
+the existing twenty-second activity tail, provided joint states keep arriving.
+
+This collection cadence does not schedule critic predictions. The native critic
+uses its model's `decision_hz` (currently 30 Hz) to evaluate rolling context;
+it does not wait for a complete saved MCAP. Scheduling frequency is not a
+measured end-to-end detection latency guarantee.
+
+Required streams must cover the interval, with no receipt gap or
 endpoint gap above one second, and no known invalid messages. The exported MCAP
 is checked again, so expired pre-roll cannot be accepted using old metadata.
 Image payload decoding remains the existing cloud verifier/renderer's job.

@@ -213,6 +213,9 @@ struct FakeController final : ControllerAdapter {
   std::string outcome = "running";
   bool hold_ack = true, begin_ack = true, resume_ack = true;
   int prepares = 0, begins = 0, holds = 0;
+  int resumes = 0;
+  Handback handback = Handback::ready;
+  Json handback_context;
   bool ready() const override { return true; }
   bool prepare(const fs::path &, const Json &, const Json &) override {
     ++prepares;
@@ -220,7 +223,11 @@ struct FakeController final : ControllerAdapter {
   }
   bool begin() override { ++begins; return begin_ack; }
   std::string poll() override { return outcome; }
-  bool resume() override { return resume_ack; }
+  bool resume() override { ++resumes; return resume_ack; }
+  Handback prepare_handback(const Json &context) override {
+    handback_context = context;
+    return handback;
+  }
   bool hold(const std::string &) override { ++holds; return hold_ack; }
 };
 struct FakeWorkflowTransport final : WorkflowTransport {
@@ -932,6 +939,30 @@ void authorized_handover_test() {
             authority.releases == 1,
         "revocation during recovery retains fallback instead of blind release");
 }
+void runtime_handback_failure_tests() {
+  for (int fault = 0; fault < 4; ++fault) {
+    Fixture f;
+    const auto deployment = f.deploy(true);
+    FakeCritic critic;
+    FakeController controller;
+    Runtime runtime(f.store, critic, controller);
+    critic.detection->deployment_id = deployment["id"];
+    critic.detection->deployment_validated = true;
+    critic.detection->proposition_id = "target_moved";
+    runtime.activate();
+    runtime.step({}, 0);
+    controller.outcome = "succeeded";
+    controller.handback = ControllerAdapter::Handback::pending;
+    check(runtime.step({}, 0.1).is_null(), "handback can remain pending");
+    if (fault == 0) controller.handback = ControllerAdapter::Handback::failed;
+    if (fault == 1) controller.outcome = "authority_lost";
+    if (fault == 3) f.apply("deactivate", {{"reason", "operator"}});
+    const auto result = runtime.step({}, fault == 2 ? 2 : 0.2);
+    check(result["kind"] == "fallback" && controller.resumes == 0 &&
+              controller.holds == 1 && runtime.status == "held",
+          "failed readiness, ownership loss, timeout or revoked approval forbids handback");
+  }
+}
 void runtime_tests() {
   Fixture f;
   const auto deployment = f.deploy(true);
@@ -954,6 +985,13 @@ void runtime_tests() {
   critic.exit_score = 0;
   check(r.step({}, 0.06).is_null(), "exit gate must be positively satisfied");
   critic.exit_score = 1;
+  controller.handback = ControllerAdapter::Handback::pending;
+  check(r.step({}, 0.08).is_null() && r.status == "recovering" && controller.resumes == 0,
+        "runtime waits for client readiness after action and critic exit success");
+  check(!controller.handback_context.at("episode_id").get<std::string>().empty() &&
+            controller.handback_context.at("deployment_id") == deployment["id"],
+        "handback preparation binds the active episode and approved deployment");
+  controller.handback = ControllerAdapter::Handback::ready;
   check(r.step({}, 0.1)["kind"] == "recovery_completed",
         "completion acknowledged");
   const auto completed = f.store.pending_enforcements();
@@ -1021,6 +1059,7 @@ int main() {
     handover_tests();
     authorization_tests();
     authorized_handover_test();
+    runtime_handback_failure_tests();
     runtime_tests();
     std::cout << checks << " native observation/workflow checks passed\n";
     return 0;

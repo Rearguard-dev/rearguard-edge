@@ -53,9 +53,19 @@ struct ControllerAdapter {
   virtual bool ready() const = 0;
   virtual bool prepare(const fs::path &, const Json &, const Json &) = 0;
   virtual bool begin() = 0;
+  // Eligibility check before acquiring authority, including incident rearming.
+  virtual bool can_begin() const { return true; }
   virtual std::string poll() = 0;
   virtual bool resume() = 0;
   virtual bool hold(const std::string &) = 0;
+  // Non-realtime observation tick. Existing adapters keep their current path.
+  virtual void observe(const Observations &, double) {}
+  enum class Handback { pending, ready, failed };
+  // Called repeatedly while recovery still owns commands. New library adapters
+  // must prepare the client here; resume() only commits a prepared handback.
+  virtual Handback prepare_handback(const Json &) { return Handback::ready; }
+  virtual void handback_confirmed() {}
+  virtual Json telemetry() const { return nullptr; }
 };
 struct CriticInferencePlaceholder final : CriticAdapter {
   bool ready() const override { return false; }
@@ -93,6 +103,7 @@ class Runtime {
   std::string proposition_id_;
   harness::tiny::ExitGate exit_gate_;
   bool controller_completed_ = false;
+  std::string recovery_episode_id_;
   Ns recovery_started_receipt_ns_ = -1, recovery_epoch_ = -1;
   void validate_authorization(const Json &snapshot) const;
   void record_enforcement(const std::string &outcome, const Json &detail,

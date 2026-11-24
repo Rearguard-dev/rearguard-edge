@@ -25,6 +25,11 @@ The kernel does four things, in this order, every control cycle:
 
 ## What you get
 
+The native recovery-library executor and its integration boundaries are described
+in [Recovery library](docs/recovery-library.md).
+Concrete adapters and the SO-101/PiPER test gates are documented in
+[Recovery adapters](docs/recovery-adapters.md).
+
 ```
 harness-kernel-<version>-<target>.tar.gz
 ├── bin/rearguard                    validate | show | replay | verify | hash | diff | abi

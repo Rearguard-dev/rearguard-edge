@@ -186,10 +186,10 @@ Json PhysicalModel::score(Ns anchor,Ns epoch) {
     fusion.input("event_source_offset_s")[i]=-age;fusion.input("event_available_offset_s")[i]=-age;}
   auto &residual=fusion.input("residual"),&rm=fusion.input("residual_mask");const auto offset=511*j_*3;
   for(std::size_t i=0;i<j_;++i){for(std::size_t col=0;col<3;++col){residual[i*8+col]=past[offset+i*3+col];rm[i*8+col]=observed[offset+i*3+col];}
-    const auto &meta=context_.at("joints").at(joints_[i]);if(meta.contains("position_lower") && meta.contains("position_upper") && rm[i*8]){
-      const double lo=meta.at("position_lower"),hi=meta.at("position_upper");require(hi>lo,"invalid physical joint limits");const double p=residual[i*8];residual[i*8+6]=static_cast<float>(std::min(p-lo,hi-p)/(hi-lo));rm[i*8+6]=1;}
+    const auto &meta=context_.at("joints").at(joints_[i]);if(meta.contains("position_lower") && meta.contains("position_upper") && rm[i*8]!=0.0F){
+      const double lo=meta.at("position_lower"),hi=meta.at("position_upper");require(hi>lo,"invalid physical joint limits");const double p=static_cast<double>(residual[i*8]);residual[i*8+6]=static_cast<float>(std::min(p-lo,hi-p)/(hi-lo));rm[i*8+6]=1;}
     if(active.contains(i)){const auto &event=*active[i];residual[i*8+3]=event.value;residual[i*8+7]=seconds(anchor-event.stamp);rm[i*8+3]=rm[i*8+7]=1;
-      if(rm[i*8]){double error=event.value-residual[i*8];if(meta.at("type")=="continuous"){error=std::fmod(error+M_PI,2*M_PI);if(error<0)error+=2*M_PI;error-=M_PI;}residual[i*8+4]=static_cast<float>(error);rm[i*8+4]=1;}}}
+      if(rm[i*8]!=0.0F){double error=static_cast<double>(event.value-residual[i*8]);if(meta.at("type")=="continuous"){error=std::fmod(error+M_PI,2*M_PI);if(error<0)error+=2*M_PI;error-=M_PI;}residual[i*8+4]=static_cast<float>(error);rm[i*8+4]=1;}}}
   fusion.input("step_mask")[0]=1;fusion.input("time_features")[0]=last_<0?0:seconds(anchor-last_);fusion.input("time_features")[1]=eligible.size()>e_?1:0;
   if(last_>=0) {
     const auto skipped=std::max<Ns>(0,static_cast<Ns>(std::llround(static_cast<double>(anchor-last_)*manifest_.at("spec").at("decision_hz").get<double>()/1e9))-1);

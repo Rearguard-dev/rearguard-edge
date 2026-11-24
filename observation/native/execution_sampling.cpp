@@ -20,7 +20,7 @@ bool valid(const std::vector<double> &a) {
 }
 }
 ExecutionSampler::ExecutionSampler(fs::path root, unsigned seed):root_(std::move(root)),random_(seed) {
-  policy_={{"schema_version",1},{"enabled",true},{"mean_interval_s",300.},
+  policy_={{"schema_version",1},{"enabled",true},{"mean_interval_s",30.},
     {"joint_delta",.01},{"daily_limit",12},{"bootstrap_limit",40},{"failure_ratio",3},
     {"pool_limit",200},{"max_window_bytes",64*1024*1024},
     {"pool_bytes",4294967296LL},{"pending_bytes",268435456LL}};
@@ -56,9 +56,12 @@ ExecutionSampler::ExecutionSampler(fs::path root, unsigned seed):root_(std::move
 }
 ExecutionSampler::~ExecutionSampler() {if(lock_>=0) ::close(lock_);}
 void ExecutionSampler::next() {
-  // Random, score-independent sampling in eligible operation time. No bursts.
-  std::exponential_distribution<double> distribution(1./policy_["mean_interval_s"].get<double>());
-  next_s_=std::max(15.,distribution(random_)); eligible_s_=0;
+  // Retain the first complete eligible window promptly. Later draws are bounded
+  // and score-independent; an exponential tail can miss entire short operations.
+  const auto mean=policy_["mean_interval_s"].get<double>();
+  std::uniform_real_distribution<double> distribution(15.,2.*mean-15.);
+  next_s_=ledger_.at("reservations").empty()?15.:distribution(random_);
+  eligible_s_=0;
 }
 void ExecutionSampler::reset() {
   anchor_.clear();target_.clear();anchor_at_=last_joint_=activity_at_=motion_at_=last_tick_=last_end_=-1;
@@ -123,6 +126,7 @@ std::optional<Json> ExecutionSampler::select(Ns ros,Ns now,Ns wall,const Json &s
   ledger_["reservations"].push_back({{"id",id},{"day",day},{"reserved_bytes",reserve}});
   atomic_json(root_/"execution-sampling-ledger.json",ledger_); // Reserve before capture; crashes cannot exceed quotas.
   last_end_=ros;
+  next(); // The reservation now exists, so subsequent draws use the bounded cadence.
   state_="selected_unlabeled_window";
   return Json{{"id",id},{"reason",motion_at_>=0 && now-motion_at_<second?"measured_motion":"execution_pause_or_command_change"},
     {"label_status","unlabeled"},{"max_bytes",reserve},{"policy",policy_},{"accepted_real_failure_sources",failures.size()}};
