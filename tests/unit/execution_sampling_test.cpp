@@ -32,8 +32,31 @@ void activity(){
   check(operate(first,17).has_value(),"short operation retained with default policy");
   check(first.status()["next_draw_seconds"].get<double>()>=15. &&
         first.status()["next_draw_seconds"].get<double>()<=45.,"default subsequent draw bounded");
+  // Genuine inactivity resets only scheduling, not the durable reservation count.
+  for (int i=170;i<501;++i) {
+    const auto now=static_cast<Ns>(i)*100000000LL;
+    first.joints({1.69},now);
+    first.select(100*second+now,now,20000*86400*second,snapshot(),observation());
+  }
+  check(first.status()["next_draw_seconds"]==15. && first.status()["eligible_seconds_since_draw"]==0.,
+        "next operation after inactivity must not inherit a long random wait");
+  check(first.status()["reserved_windows"]==1,"idle reset cannot clear reservations");
   first.reset();
-  check(first.status()["next_draw_seconds"].get<double>()<=45.,"clock reset retains bounded cadence");
+  check(first.status()["next_draw_seconds"]==15.,"clock reset gets prompt first window");
+  Fixture restarted;fs::remove(restarted.root/"execution-sampling-policy.json");
+  {
+    ExecutionSampler prior(restarted.root,5);check(operate(prior,17).has_value(),"prior reservation created");
+    const auto ledger=read_json(restarted.root/"execution-sampling-ledger.json");
+    fs::create_directories(restarted.root/"execution-samples");
+    atomic_json(restarted.root/"execution-samples"/(ledger["reservations"][0]["id"].get<std::string>()+".rejected.json"),
+                {{"reason","prior rejected export"}});
+  }
+  {
+    ExecutionSampler fresh(restarted.root,5);
+    check(fresh.status()["next_draw_seconds"]==15.,"rejected prior reservation cannot delay a new session");
+    check(operate(fresh,17).has_value() && fresh.status()["reserved_windows"]==2,
+          "new short operation captured without clearing prior quota");
+  }
   Fixture f;ExecutionSampler s(f.root,5);
   check(!operate(s,120,snapshot(),observation(),false),"stationary joint traffic cannot trigger");
   s.reset();

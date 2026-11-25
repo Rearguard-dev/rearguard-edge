@@ -42,8 +42,10 @@ including stationary pauses long enough to yield a fully stationary 15-second wi
 from mere ROS topic presence. The initial implementation does not allocate
 separate pause/motion quotas or pose-diversity buckets.
 
-The first selection with an empty reservation ledger is due after 15 seconds
-of eligible activity. Subsequent intervals are uniform between 15 seconds and
+The first selection of each session is due after 15 seconds of eligible
+activity, including when previous sessions left submitted or rejected reservations.
+After the twenty-second activity tail expires, the next activity episode also
+starts with a 15-second draw. These scheduling resets never clear quota reservations. Subsequent intervals are uniform between 15 seconds and
 `2 * mean_interval_s - 15`: 15–45 seconds with the default mean of 30 seconds.
 This removes the several-minute random tail. Setting `mean_interval_s` to 15
 selects every 15 eligible seconds. Existing explicit policy overrides remain
@@ -234,3 +236,11 @@ with unvalidated-alert overlap metadata, continued exclusion of operator inciden
 and unchanged coverage/byte guards. Queue tests checked archived originals,
 preserved completion tombstones and retries, idempotent compaction, and retirement
 waiting for local export. No installed service or cloud data was changed.
+
+First-operation scheduling correction verified on 2026-11-25: new sessions and
+new activity episodes after the twenty-second tail start with a 15-second draw,
+regardless of historical reservations. The regression recreates an old rejected
+sample, reopens the sampler, and captures a short new operation without clearing
+quotas. Idle/clock resets preserve reservation counts. The ROS-enabled CLI rebuilt
+and sampler, offline MCAP and loopback HTTP targets passed (6.73 s) in the isolated
+Linux cache; the installed service was not changed or restarted.

@@ -60,21 +60,21 @@ ExecutionSampler::ExecutionSampler(fs::path root, unsigned seed):root_(std::move
   const auto ledger=root_/"execution-sampling-ledger.json";
   ledger_=fs::exists(ledger)?read_json(ledger):Json{{"schema_version",1},{"reservations",Json::array()}};
   require(ledger_["schema_version"]==1 && ledger_["reservations"].is_array(),"invalid sampling ledger");
-    next();
+    next_s_=15.; // Each new session gets a prompt first draw, even with old reservations.
   } catch (...) {::close(lock_);lock_=-1;throw;}
 }
 ExecutionSampler::~ExecutionSampler() {if(lock_>=0) ::close(lock_);}
 void ExecutionSampler::next() {
-  // Retain the first complete eligible window promptly. Later draws are bounded
-  // and score-independent; an exponential tail can miss entire short operations.
+  // Later draws within ongoing work are bounded and score-independent.
+  // First draws belong to activity/session state, never to the persistent quota ledger.
   const auto mean=policy_["mean_interval_s"].get<double>();
   std::uniform_real_distribution<double> distribution(15.,2.*mean-15.);
-  next_s_=ledger_.at("reservations").empty()?15.:distribution(random_);
+  next_s_=distribution(random_);
   eligible_s_=0;
 }
 void ExecutionSampler::reset() {
   anchor_.clear();target_.clear();anchor_at_=last_joint_=activity_at_=motion_at_=last_tick_=last_end_=-1;
-  next(); // Persistent reservations survive clock resets/restarts.
+  eligible_s_=0;next_s_=15.; // Reset scheduling, never persistent quotas.
 }
 void ExecutionSampler::joints(const std::vector<double> &positions,Ns now) {
   if (!valid(positions)) return;
@@ -95,6 +95,9 @@ std::optional<Json> ExecutionSampler::select(Ns ros,Ns now,Ns wall,const Json &s
   const auto elapsed=last_tick_<0?0.:static_cast<double>(now-last_tick_)/1e9;
   last_tick_=now;
   state_="waiting_for_activity";
+  if (activity_at_<0 || now-activity_at_>20*second) {
+    eligible_s_=0;next_s_=15.; // A new operation after inactivity gets a complete first window.
+  }
   if (!policy_["enabled"].get<bool>() || elapsed<=0 || elapsed>2 || last_joint_<0 ||
       now-last_joint_>500000000LL || activity_at_<0 || now-activity_at_>20*second) return std::nullopt;
   eligible_s_+=elapsed;
