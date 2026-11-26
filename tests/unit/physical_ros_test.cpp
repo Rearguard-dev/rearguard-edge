@@ -35,6 +35,20 @@ int main(int argc,char **argv) {
     std::vector<std::uint8_t> camera_bytes(jpeg,jpeg+size);tjFree(jpeg);
     Observations observations;observations.config=binding;observations.epoch=0;
     Json telemetry;bool scored=false;const auto started=std::chrono::steady_clock::now();
+    for (int phase=0;phase<2;++phase) {
+      if (phase==1) {
+        const auto submitted=telemetry.at("inference_submissions");
+        const auto old_time=observations.receipt_ros_ns;
+        const auto max_age=static_cast<Ns>(manifest.at("preprocessing").at("max_age_s").get<double>()*1e9);
+        for (int idle=0;idle<30;++idle) {
+          observations.receipt_ros_ns=old_time+max_age+100000000LL+static_cast<Ns>(idle)*33333333LL;
+          require(!adapter->evaluate(observations),"stale inputs produced a detection");
+          const auto stopped=adapter->telemetry();
+          require(stopped.at("inference_submissions")==submitted && stopped.at("scores").empty() &&
+                  stopped.at("status")=="insufficient_evidence","idle input queued work or exposed old scores");
+        }
+        observations.messages.clear();++observations.epoch;scored=false;
+      }
     for(int attempt=0;attempt<120;++attempt) {
       const Ns now=wall_ns(),source=now-5000000LL;
       builtin_interfaces::msg::Time stamp;stamp.sec=static_cast<std::int32_t>(source/1000000000LL);stamp.nanosec=static_cast<std::uint32_t>(source%1000000000LL);
@@ -56,9 +70,10 @@ int main(int argc,char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     require(scored,"no fresh ROS-decoded model score: "+telemetry.dump());
+    }
     std::cout<<Json{{"status","passed"},{"model_id",selection.at("model_id")},{"mode","shadow"},
       {"wall_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()},
-      {"telemetry",telemetry},{"scope","in-process ROS serialization test; no ROS publications or robot commands"}}.dump(2)<<'\n';
+      {"telemetry",telemetry},{"idle_guard","stale inputs queued zero jobs; fresh epoch resumed scoring"},{"scope","in-process ROS serialization test; no ROS publications or robot commands"}}.dump(2)<<'\n';
     return 0;
   } catch(const std::exception &error){std::cerr<<error.what()<<'\n';return 1;}
 }

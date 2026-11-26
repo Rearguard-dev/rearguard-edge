@@ -116,6 +116,7 @@ Json compile_observation_binding(const Json &inventory, Ns domain_id,
                       {"type", "sensor_msgs/msg/CompressedImage"},
                       {"role", "camera"}, {"required", true}});
 
+  topics=observation_topics(Json{{"topics",topics}});
   return {{"schema_version", 1},
           {"mode", "observation_only"},
           {"robot", robot_label.empty() ? "discovered" : robot_label},

@@ -149,7 +149,9 @@ Json ExecutionSampler::status() const {
     {"pool_behavior","pause_at_capacity_no_automatic_deletion"}};
 }
 bool sample_coverage(const Json &binding,const Json &coverage,Ns start,Ns end) {
-  for (const auto &t:binding.at("topics")) {
+  // Check every recorded non-action stream. Only redundant color aliases are
+  // projected out; depth and other distinct modalities retain their own checks.
+  for (const auto &t:observation_topics(binding)) {
     if (t.value("role","")=="action") continue; // Commands are events, not a fixed-rate stream.
     const auto name=t.at("name").get<std::string>();
     if (!coverage.contains(name)) return false;

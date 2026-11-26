@@ -154,7 +154,7 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
     return result;
   };
   try {
-    validate_authorization(store_.snapshot());
+    validate_authorization(*store_.snapshot_shared());
     if (!fresh || !std::isfinite(now))
       return fallback("observations or clock stale");
     controller_.observe(observations, now);
@@ -193,7 +193,7 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
         if (readiness != ControllerAdapter::Handback::ready)
           return fallback("handback readiness failed");
         // Authorization may have changed while an adapter prepared the client.
-        validate_authorization(store_.snapshot());
+        validate_authorization(*store_.snapshot_shared());
         if (!controller_.resume())
           return fallback("nominal reentry not acknowledged");
         authority_requested_ = false;

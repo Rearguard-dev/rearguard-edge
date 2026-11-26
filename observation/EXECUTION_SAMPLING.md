@@ -244,3 +244,54 @@ sample, reopens the sampler, and captures a short new operation without clearing
 quotas. Idle/clock resets preserve reservation counts. The ROS-enabled CLI rebuilt
 and sampler, offline MCAP and loopback HTTP targets passed (6.73 s) in the isolated
 Linux cache; the installed service was not changed or restarted.
+
+
+## Steady-state efficiency (2026-11-26)
+
+The observer keeps the frozen logical binding and its hash for existing profiles,
+but records/subscribes to a single color transport per physical camera when both
+`/compressed` and `/zstd` are bound: JPEG is preferred. Session metadata includes
+`recorded_topics` so the effective recording is explicit. New discovery bindings
+omit the redundant alias. A standalone Zstd stream, depth streams, joints and
+commands are retained. Sample coverage checks every selected non-action stream;
+the one-second continuity checks, byte limits and 15-second windows are unchanged.
+
+Workflow readers hold immutable shared JSON snapshots behind read-only SQLite
+connections. Every read checks `PRAGMA data_version`; an external commit forces a
+fresh parse, even if the profile revision did not change. A database identity check
+also detects file replacement. Missing/corrupt databases fail closed instead of
+serving an old cached authorization. Runtime permission checks retain their
+existing cadence. The value-returning snapshot API remains available for callers
+that need a mutable copy.
+
+The supervisor reuses its workflow reader and snapshot within each pass and reads
+session identity once per export scan. The uploader reuses one profile snapshot
+across historical sessions per pass. Local sample preservation remains independent
+of HTTP. These changes remove repeated full-store construction, JSON parsing and
+copying from unchanged polling loops, rather than delaying those loops.
+
+Physical inference keeps its configured decision cadence while recent packets
+exist, including stationary robot scenes. Once all input packets exceed the
+model's freshness horizon, no new ONNX jobs are queued and live scores are cleared
+as insufficient evidence. Fresh packets resume scheduling; missed history remains
+masked by the existing model path. The model, resolution, thresholds, runtime
+authorization, capture quotas and hardware freshness limit are not reduced.
+
+Validation includes five efficiency check groups: immutable cache reuse and
+external-update visibility, fail-closed/replaced databases, transport projection,
+inference input freshness, and a synthetic large-profile polling benchmark.
+Camera delivery baseline on the laptop (30-second passive measurements): with the
+previous edge running, external/wrist max gaps were 980/960 ms at 4.1/12.2 FPS;
+with it stopped, max gaps were 325/153 ms at 6.2/19.1 FPS. The wrist camera used
+MJPEG for both measurements and the external camera used YUYV. Live CPU, memory,
+I/O and camera timing with the updated release must be measured after the operator
+installs it; microbenchmarks do not establish whole-device power savings.
+
+Validation result: the ROS-enabled CLI and all nine selected regression targets
+passed in the isolated Linux cache (31.78 s). The 1,024-candidate synthetic profile
+benchmark measured 20 repeated store-construction/copy reads at 957.26 ms versus
+20 shared cached reads at 0.122 ms. These are polling-path timings, not a claim
+about total edge CPU, watts or temperature. The installed physical model also
+passed an in-process synthetic-image probe: stale input queued zero new jobs and
+exposed no live scores; a fresh epoch resumed valid shadow scoring. The probe
+published no ROS messages, used no real images and changed no installed service.

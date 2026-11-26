@@ -22,12 +22,13 @@ int main() {
   try {
     fs::create_directories(root/"rosbag2");
     const Json topics=Json::array({{{"name","/joint"},{"type","sensor_msgs/msg/JointState"},{"role","joint_state"}},
-      {{"name","/camera"},{"type","sensor_msgs/msg/CompressedImage"},{"role","camera"}},
+      {{"name","/camera/image_raw/compressed"},{"type","sensor_msgs/msg/CompressedImage"},{"role","camera"}},
       {{"name","/wrist"},{"type","sensor_msgs/msg/CompressedImage"},{"role","camera"}},
+      {{"name","/camera/image_raw/zstd"},{"type","sensor_msgs/msg/CompressedImage"},{"role","camera"}},
       {{"name","/commands"},{"type","std_msgs/msg/Float64MultiArray"},{"role","action"}}});
     const Json binding={{"topics",topics},{"joint_order",{"j"}},{"clock","ros_sim"}};
     atomic_json(root/"session.json",{{"config",binding}});
-    Recording recording(root,topics);Evidence evidence(binding,"offline-test");
+    Recording recording(root,observation_topics(binding));Evidence evidence(binding,"offline-test");
     for (Ns i=0;i<=150;++i) {
       const Ns time=1000000000LL+i*100000000LL;evidence.tick(time,i*100000000LL);
       sensor_msgs::msg::JointState joint;joint.name={"j"};joint.position={static_cast<double>(i)*.001};
@@ -37,7 +38,7 @@ int main() {
       sensor_msgs::msg::CompressedImage camera;camera.format="jpeg";camera.data={1,2,3,4};
       const auto source=time-800000000LL;camera.header.stamp.sec=static_cast<int>(source/1000000000LL);
       camera.header.stamp.nanosec=static_cast<unsigned>(source%1000000000LL);
-      for (const auto *name:{"/camera","/wrist"}) {
+      for (const auto *name:{"/camera/image_raw/compressed","/wrist"}) {
         recording.write(name,"sensor_msgs/msg/CompressedImage",encode(camera),time,0);
         evidence.sample(name,time,source,i*100000000LL);
       }

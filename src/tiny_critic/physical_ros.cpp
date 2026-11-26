@@ -32,6 +32,7 @@ class PhysicalAdapter final:public observation::CriticAdapter {
   std::map<std::string,Ns> processed_;
   Ns epoch_=-1,submitted_=-1,processed_epoch_=-1,last_candidate_=-1,last_result_=-1,origin_=-1;
   bool positive_=false;
+  std::uint64_t inference_submissions_=0;
   Worker worker_; // Join before destroying models and packet state.
 public:
   PhysicalAdapter(const fs::path &path,Json binding,Json selection):model_(path,binding,selection),binding_(std::move(binding)),selection_(std::move(selection)) {
@@ -57,7 +58,9 @@ public:
     const auto hz=model_.manifest().at("spec").at("decision_hz").get<double>();
     const auto tick=std::floor(static_cast<double>(now-origin_)*hz/1e9);
     const auto anchor=origin_+static_cast<Ns>(std::llround(tick*1e9/hz));
-    if(submitted_<0 || anchor>submitted_) {
+    const auto max_age=static_cast<Ns>(model_.manifest().at("preprocessing").at("max_age_s").get<double>()*1e9);
+    const bool recent=observation::has_recent_input(observations,max_age);
+    if(recent && (submitted_<0 || anchor>submitted_)) {
       std::vector<observation::ObservationMessage> packets;std::map<std::string,observation::ObservationMessage> cameras;
       for(const auto &packet:observations.messages)if(topics_.contains(packet.topic) && packet.receipt_ros_ns<=anchor) {
         if(topics_.at(packet.topic).at("role")=="camera")cameras[packet.topic]=packet;
@@ -106,10 +109,14 @@ public:
         auto result=model_.score(now,epoch);const auto ended=observation::monotonic_ns();
         result.update({{"queue_delay_us",static_cast<double>(started-queued)/1000.},
           {"evaluation_us",static_cast<double>(ended-started)/1000.},{"binding_hash",selection_.at("binding_hash")}});return result;
-      });submitted_=anchor;
+      });submitted_=anchor;++inference_submissions_;
     }
-    latest_=worker_.latest(now,observations.epoch,static_cast<Ns>(model_.manifest().at("preprocessing").at("max_age_s").get<double>()*1e9));
-    latest_.update({{"model_id",selection_.at("model_id")},{"profile_id",selection_.at("profile_id")},
+    latest_=worker_.latest(now,observations.epoch,max_age);
+    if (!recent) {
+      latest_["status"]="insufficient_evidence";latest_["scores"]=Json::object();
+      latest_["reason"]="no recent observation packets";
+    }
+    latest_.update({{"inference_submissions",inference_submissions_},{"has_recent_input",recent},{"model_id",selection_.at("model_id")},{"profile_id",selection_.at("profile_id")},
       {"binding_hash",selection_.at("binding_hash")},{"source","experimental_critic"},{"mode","shadow"},{"calibrated",false},{"enforcement_authorized",false}});
     if(latest_.value("status","")!="valid"){positive_=false;return std::nullopt;}
     const Ns result_time=latest_.at("t_ns");if(result_time==last_result_)return std::nullopt;last_result_=result_time;

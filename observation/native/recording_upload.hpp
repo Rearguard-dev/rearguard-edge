@@ -10,7 +10,7 @@ namespace harness::observation {
 // for asynchronous verification/indexing, not already verified.
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
                               const DeviceCredentials &credentials, bool include_execution_samples = true,
-                              bool spool_local = true);
+                              bool spool_local = true, const Json *profile_snapshot = nullptr);
 Ns recording_retry_delay_ns(unsigned attempts);
 // Local-only export; never waits for HTTP. One spooler owns a profile at a time.
 void spool_execution_samples(const fs::path &store, const fs::path &session);

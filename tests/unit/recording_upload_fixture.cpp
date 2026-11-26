@@ -23,7 +23,8 @@ int main(int argc,char **argv) {
     };
     DeviceCredentials credentials{"synthetic-device","synthetic-secret",argv[1]};
     sample("sample-fresh");
-    require(upload_closed_recordings(store.root,session,credentials)["execution_samples"]==1,"fresh transfer failed");
+    const auto profile=store.snapshot_shared();
+    require(upload_closed_recordings(store.root,session,credentials,true,true,profile.get())["execution_samples"]==1,"fresh transfer failed");
     // Submitted entries must be skipped before even parsing their manifests.
     {std::ofstream out(directory/"sample-fresh.json");out<<"not JSON";}
     require(upload_closed_recordings(store.root,session,credentials)["execution_samples"]==0,"submitted transfer repeated");

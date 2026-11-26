@@ -469,7 +469,7 @@ class Observer {
     auto canonical_detection = detection;
     canonical_detection["before_s"] = 10.0;
     canonical_detection["after_s"] = 5.0;
-    const auto capture_context = freeze_capture_context(store_->snapshot());
+    const auto capture_context = freeze_capture_context(*store_->snapshot_shared());
     auto &w = evidence_.capture(10.0, 5.0, detection.at("evidence_class"));
     w["capture_context"] = capture_context;
     w.update({{"trigger", "critic_candidate"}, {"detection", canonical_detection}});
@@ -511,7 +511,7 @@ class Observer {
                                ? 5.0
                                : data.at("after").get<double>();
         const auto capture_context = store_
-            ? freeze_capture_context(store_->snapshot(), data.value("capture_context", Json(nullptr)))
+            ? freeze_capture_context(*store_->snapshot_shared(), data.value("capture_context", Json(nullptr)))
             : Json{{"schema_version", 1}, {"status", "partial"},
                    {"missing_fields", Json::array({"profile"})}, {"binding_hash", digest(config_)},
                    {"binding", config_}, {"critic_context", nullptr}};
@@ -571,7 +571,8 @@ class Observer {
       try {
         require(evidence_.last_clock_advance && monotonic_ns()-*evidence_.last_clock_advance<=1000000000LL,
                 "execution sampling requires an advancing ROS clock");
-        const auto profile=store_->snapshot();
+        const auto profile_snapshot=store_->snapshot_shared();
+        const auto &profile=*profile_snapshot;
         if (const auto selected=sampler_->select(*evidence_.now,monotonic_ns(),wall_ns(),profile,evidence_.state)) {
           auto &window=evidence_.capture(15.,0.,"Unlabeled execution sample");
           window["execution_sample"]=*selected;
@@ -600,7 +601,7 @@ class Observer {
                  {"request_id",
                   "candidate-" + id_ + "-" + window["id"].get<std::string>()},
                  {"actor", "edge_observer"},
-                 {"expected_revision", store_->snapshot()["revision"]},
+                 {"expected_revision", store_->snapshot_shared()->at("revision")},
                  {"operation", "candidate"},
                  {"payload",
                   {{"window", window},
@@ -617,7 +618,8 @@ class Observer {
         announced_.insert(window["id"].get<std::string>());
       }
     if (store_) {
-      const auto profile = store_->snapshot();
+      const auto profile_snapshot=store_->snapshot_shared();
+      const auto &profile=*profile_snapshot;
       if (profile["revision"] != published_revision_) {
         const auto message = string_message(profile);
         profiles_->publish(message);
@@ -655,7 +657,7 @@ class Observer {
     observations.epoch = evidence_.state["epoch"].get<Ns>();
     observations.receipt_ros_ns = *evidence_.now;
     observations.messages.assign(history_.begin(), history_.end());
-    if (learned_critic_ && !physical_critic_ && store_->snapshot().at("critic_context") != learned_context_) {
+    if (learned_critic_ && !physical_critic_ && store_->snapshot_shared()->at("critic_context") != learned_context_) {
       evidence_.state["critic"] = {{"status", "context_mismatch"}, {"scores", Json::object()}};
       return;
     }
@@ -693,7 +695,8 @@ public:
             "at least 1 GB free space required");
     if (options_.values.contains("--store")) {
       store_ = std::make_unique<Store>(options_.path("--store"));
-      const auto profile = store_->snapshot();
+      const auto profile_snapshot=store_->snapshot_shared();
+      const auto &profile=*profile_snapshot;
       require(profile["binding_hash"] == digest(config_),
               "observer config differs from workflow binding");
       try {sampler_=std::make_unique<ExecutionSampler>(store_->root);}
@@ -709,7 +712,8 @@ public:
     if (options_.values.contains("--physical-critic-bundle")) {
       require(store_!=nullptr,"physical model requires a bound profile store");
       const auto selection=read_json(options_.path("--physical-critic-selection"));
-      const auto profile=store_->snapshot();
+      const auto profile_snapshot=store_->snapshot_shared();
+      const auto &profile=*profile_snapshot;
       require(selection.at("profile_id")==profile.at("profile_id") && selection.at("binding_hash")==digest(config_),"physical model selection changed profile binding");
       learned_critic_=make_physical_critic(options_.path("--physical-critic-bundle"),config_,selection);
       learned_context_=profile.at("critic_context");physical_critic_=true;inference_=learned_critic_.get();
@@ -717,7 +721,8 @@ public:
       require(store_ != nullptr, "learned shadow critic requires --store for setup identity");
       const auto bundle = options_.path("--critic-bundle");
       const auto manifest = read_json(bundle / "manifest.json");
-      const auto profile = store_->snapshot();
+      const auto profile_snapshot=store_->snapshot_shared();
+      const auto &profile=*profile_snapshot;
       require(manifest.at("profile") == profile.at("critic_context"), "learned critic context differs from profile");
       require(manifest.at("profile_id") == profile.at("profile_id"), "learned critic belongs to another profile");
       require(manifest.at("client") == options_.need("--critic-client"), "learned critic client differs");
@@ -750,9 +755,10 @@ public:
                                         "message headers retain source time"},
                  {"workflow_store",
                   store_ ? Json(store_->root.string()) : Json(nullptr)}};
+    meta["recorded_topics"]=observation_topics(config_);
     atomic_json(session_ / "session.json", meta);
     atomic_json(session_ / "state.json", evidence_.state);
-    auto topics = config_["topics"];
+    auto topics = observation_topics(config_);
     topics.push_back(
         {{"name", prefix_ + "/events"}, {"type", "std_msgs/msg/String"}});
     if (store_)

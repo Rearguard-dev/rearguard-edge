@@ -1,13 +1,18 @@
 #pragma once
 #include "common.hpp"
+#include <memory>
 namespace harness::observation {
+struct SnapshotState;
 class Store {
+  std::shared_ptr<SnapshotState> snapshots_;
 public:
   fs::path root;
   explicit Store(fs::path directory);
   static Store create(const fs::path &directory, const fs::path &config,
                       const std::string &profile_id = "");
   Json snapshot() const;
+  // Immutable, shared snapshot; checks SQLite data_version on every call.
+  std::shared_ptr<const Json> snapshot_shared() const;
   Json outbox(Ns after = 0) const;
   Json import_artifact(const fs::path &source, const std::string &kind) const;
   fs::path verify_artifact(const Json &reference,

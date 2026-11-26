@@ -177,12 +177,14 @@ void binding_tests() {
         "binding uses assignment as metadata and infers a system clock");
   check(binding["joint_order"] == Json::array({"j2", "j1"}),
         "binding preserves observed joint order");
-  check(binding["topics"].size() == 5 &&
+  check(binding["topics"].size() == 4 &&
             binding["topics"][1]["role"] == "action" &&
             !binding["topics"][1]["required"].get<bool>() &&
             binding["topics"][2]["name"] == "/front/image_raw/compressed",
-        "unpublished commands remain optional and camera transports stay observable");
-  const auto groups = required_topic_groups(binding);
+        "unpublished commands remain optional and duplicate color transports are omitted");
+  auto legacy=binding;
+  legacy["topics"].push_back({{"name","/front/image_raw/zstd"},{"role","camera"},{"required",true}});
+  const auto groups = required_topic_groups(legacy);
   check(groups.size() == 3 && groups[1].size() == 2,
         "legacy camera transport variants satisfy one physical-camera requirement");
   auto simulated = inventory;

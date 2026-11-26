@@ -415,7 +415,7 @@ ExecutionSampleSpooler::ExecutionSampleSpooler(fs::path store,fs::path sessions_
   }) {}
 
 Json upload_closed_recordings(const fs::path &store, const fs::path &session,
-                              const DeviceCredentials &credentials, bool include_execution_samples, bool spool_local) {
+                              const DeviceCredentials &credentials, bool include_execution_samples, bool spool_local, const Json *profile_snapshot) {
   const auto recording_path = session / "recording.json";
   const auto session_path = session / "session.json";
   if (!fs::is_regular_file(recording_path) || !fs::is_regular_file(session_path))
@@ -427,7 +427,8 @@ Json upload_closed_recordings(const fs::path &store, const fs::path &session,
           fs::weakly_canonical(store))
     return {{"uploaded", 0}, {"skipped", "session belongs to another workflow store"}};
   const auto config = session_meta.at("config");
-  const auto snapshot = Store(store).snapshot();
+  const auto owned_snapshot=profile_snapshot?std::shared_ptr<const Json>{}:Store(store).snapshot_shared();
+  const auto &snapshot=profile_snapshot?*profile_snapshot:*owned_snapshot;
   const auto profile_id = snapshot.at("profile_id").get<std::string>();
   if (spool_local) spool_execution_samples(store,session);
   // Retention is local policy, not an upload acknowledgement policy. Retire
@@ -559,7 +560,16 @@ Json run_recording_uploader(const Options &options) {
   ::signal(SIGINT, uploader_stop_handler);
   ::signal(SIGTERM, uploader_stop_handler);
   std::set<fs::path> compacted;
+  Store workflow(store);
   while (!uploader_stopping) {
+    std::shared_ptr<const Json> profile_snapshot;
+    try {profile_snapshot=workflow.snapshot_shared();}
+    catch (const std::exception &error) {
+      record_event("recording_uploader","profile_retry","failure",{{"message",error.what()}});
+      for (Ns elapsed=0;elapsed<interval_ms && !uploader_stopping;elapsed+=100)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      continue; // Local spooling stays independent; never drain using stale authorization metadata.
+    }
     std::vector<fs::path> sessions;
     if (!session.empty()) sessions.push_back(session);
     else if (fs::is_directory(sessions_root))
@@ -579,7 +589,7 @@ Json run_recording_uploader(const Options &options) {
           compact_recording_journal(candidate/"cloud-recordings.json");
           compacted.insert(candidate);
         }
-        const auto result = upload_closed_recordings(store, candidate, credentials, samples, false);
+        const auto result = upload_closed_recordings(store, candidate, credentials, samples, false,profile_snapshot.get());
         if (!result.contains("skipped")) sample_bindings.insert(binding);
         if (result.value("uploaded", 0U) > 0)
           record_event("recording_uploader", "submitted", "success",

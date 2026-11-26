@@ -22,6 +22,8 @@ void require(bool condition, const std::string &message);
 std::string required_text(const Json &value, const std::string &name);
 Json load_config(const fs::path &path);
 std::string camera_source_name(std::string name);
+// Keep one color transport when JPEG and Zstd are aliases of the same source.
+Json observation_topics(const Json &binding);
 std::vector<std::vector<std::string>> required_topic_groups(const Json &config);
 struct Options {
   std::string command;

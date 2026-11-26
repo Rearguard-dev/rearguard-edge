@@ -40,6 +40,14 @@ struct Observations {
   Json config;
   std::vector<ObservationMessage> messages;
 };
+// A stopped stream cannot produce valid live inference. Continue checking at
+// the configured cadence, but avoid ONNX work once every input is stale.
+inline bool has_recent_input(const Observations &observations,Ns max_age) {
+  for (auto it=observations.messages.rbegin();it!=observations.messages.rend();++it)
+    if (it->receipt_ros_ns<=observations.receipt_ros_ns &&
+        observations.receipt_ros_ns-it->receipt_ros_ns<=max_age) return true;
+  return false;
+}
 struct CriticAdapter {
   virtual ~CriticAdapter() = default;
   virtual bool ready() const = 0;

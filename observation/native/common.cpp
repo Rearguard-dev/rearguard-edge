@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include <set>
 #include <array>
 #include <charconv>
 #include <chrono>
@@ -213,6 +214,22 @@ std::string camera_source_name(std::string name) {
     if (name.ends_with(suffix))
       return name.substr(0, name.size() - std::char_traits<char>::length(suffix));
   return name;
+}
+Json observation_topics(const Json &binding) {
+  std::set<std::string> jpeg;
+  for (const auto &topic:binding.at("topics")) {
+    const auto name=topic.at("name").get<std::string>();
+    if (topic.value("role","")=="camera" && name.ends_with("/compressed") &&
+        topic.value("type","")=="sensor_msgs/msg/CompressedImage") jpeg.insert(camera_source_name(name));
+  }
+  Json selected=Json::array();
+  for (const auto &topic:binding.at("topics")) {
+    const auto name=topic.at("name").get<std::string>();
+    if (topic.value("role","")=="camera" && name.ends_with("/zstd") &&
+        topic.value("type","")=="sensor_msgs/msg/CompressedImage" && jpeg.contains(camera_source_name(name))) continue;
+    selected.push_back(topic);
+  }
+  return selected;
 }
 std::vector<std::vector<std::string>> required_topic_groups(const Json &config) {
   std::vector<std::vector<std::string>> groups;

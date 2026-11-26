@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <fstream>
 #include <sqlite3.h>
+#include <mutex>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace harness::observation {
@@ -12,9 +14,9 @@ namespace {
 class Database {
 public:
   sqlite3 *db = nullptr;
-  explicit Database(const fs::path &path) {
+  explicit Database(const fs::path &path, bool read_only = false) {
     const auto rc =
-        sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr);
+        sqlite3_open_v2(path.c_str(), &db, read_only?SQLITE_OPEN_READONLY:SQLITE_OPEN_READWRITE, nullptr);
     if (rc != SQLITE_OK) {
       const std::string error =
           db ? sqlite3_errmsg(db) : "SQLite allocation failed";
@@ -22,6 +24,7 @@ public:
       throw std::runtime_error(error);
     }
     sqlite3_busy_timeout(db, 10000);
+    if (read_only) return;
     exec("PRAGMA synchronous=FULL");
     exec("CREATE TABLE IF NOT EXISTS enforcement_outbox("
          "id TEXT PRIMARY KEY, body TEXT NOT NULL)");
@@ -329,6 +332,37 @@ void compile_critic(Json &state, const fs::path &root, Ns profile_revision) {
         compile_state == "ready_shadow" ? "shadow" : "unavailable";
 }
 } // namespace
+// One read-only connection per store instance (shared by copies). SQLite's
+// data_version detects commits from other connections, including every apply().
+// Callers retain immutable snapshots across refreshes without deep copies.
+struct SnapshotState {
+  fs::path path;
+  std::mutex mutex;
+  std::unique_ptr<Database> reader;
+  std::shared_ptr<const Json> value;
+  Ns version=-1;
+  dev_t device=0;
+  ino_t inode=0;
+  explicit SnapshotState(fs::path source):path(std::move(source)) {}
+  std::shared_ptr<const Json> get() {
+    std::lock_guard lock(mutex);
+    struct stat identity{};
+    require(::stat(path.c_str(),&identity)==0,"workflow database unavailable");
+    if (!reader || device!=identity.st_dev || inode!=identity.st_ino) {
+      reader=std::make_unique<Database>(path,true);
+      device=identity.st_dev;inode=identity.st_ino;version=-1;value.reset();
+    }
+    Statement query(*reader,"PRAGMA data_version");
+    require(query.next(),"workflow data version unavailable");
+    const auto current=query.integer(0);
+    if (!value || current!=version) {
+      auto updated=std::make_shared<const Json>(observation::snapshot(*reader));
+      value=std::move(updated);version=current;
+    }
+    return value;
+  }
+};
+
 Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
   require(fs::is_regular_file(root / "workflow.sqlite3"),
           "workflow store missing; run workflow init first");
@@ -357,6 +391,7 @@ Store::Store(fs::path directory) : root(fs::absolute(std::move(directory))) {
       update.next();
     }
   }
+  snapshots_=std::make_shared<SnapshotState>(root/"workflow.sqlite3");
 }
 Store Store::create(const fs::path &directory, const fs::path &config,
                     const std::string &requested_profile_id) {
@@ -422,10 +457,8 @@ Store Store::create(const fs::path &directory, const fs::path &config,
   fs::create_directories(directory / "artifacts");
   return Store(directory);
 }
-Json Store::snapshot() const {
-  Database db(root / "workflow.sqlite3");
-  return observation::snapshot(db);
-}
+std::shared_ptr<const Json> Store::snapshot_shared() const { return snapshots_->get(); }
+Json Store::snapshot() const { return *snapshot_shared(); }
 Json Store::outbox(Ns after) const {
   require(after >= 0, "after must be nonnegative");
   Database db(root / "workflow.sqlite3");

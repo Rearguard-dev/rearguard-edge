@@ -145,14 +145,15 @@ void scan_setup(const Json &config) {
   write_status(code == 0 ? "configuring" : "waiting_for_ros", config);
 }
 
-void export_pending_windows(const fs::path &store, const fs::path &session) {
+void export_pending_windows(const fs::path &store, const fs::path &session,const Json &snapshot) {
   try {
-    const auto candidates = Store(store).snapshot().at("candidates");
+    const auto &candidates=snapshot.at("candidates");
+    const auto session_id=load_or_empty(session/"session.json").value("session_id","");
     for (auto it = candidates.begin(); it != candidates.end(); ++it) {
       const auto &candidate = it.value();
       if (!candidate.value("evidence", Json(nullptr)).is_null()) continue;
       if (candidate.value("session_id", "") !=
-          load_or_empty(session / "session.json").value("session_id", "")) continue;
+          session_id) continue;
       const std::vector<std::string> args{
           executable_path.string(), "workflow", "export-window", "--store", store.string(),
           "--session", session.string(), "--candidate", it.key()};
@@ -199,6 +200,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
   Ns next_assignment = 0, next_scan = monotonic_ns() + 30000000000LL;
   fs::path active_session;
   std::string active_critic_id;
+  std::map<fs::path,Store> stores;
   while (!service_stopping) {
     reap(observer_pid, "observer");
     reap(sync_pid, "workflow_sync");
@@ -305,7 +307,10 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
         sync_pid = spawn(args);
         record_event("workflow_sync", "started", "success", {{"pid", sync_pid}});
       }
-      const auto profile = Store(store).snapshot();
+      const auto [entry,inserted]=stores.try_emplace(store,store);
+      (void)inserted;
+      const auto profile_snapshot=entry->second.snapshot_shared();
+      const auto &profile=*profile_snapshot;
       auto critic = profile.value("critic_deployment", Json(nullptr));
       const auto physical=load_or_empty(store/"models"/"active.json");
       const bool physical_ready=physical.is_object() && physical.value("admitted",false) &&
@@ -378,7 +383,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session) {
                       {"session", active_session.string()}});
         active_critic_id = critic_id;
       }
-      export_pending_windows(store, active_session);
+      export_pending_windows(store, active_session,profile);
       const auto physical_runtime=load_or_empty(store/"models"/"runtime.json");
       const bool current_runtime=physical_ready && physical_runtime.is_object() &&
         physical_runtime.value("model_id","")==physical.value("model_id","") &&
