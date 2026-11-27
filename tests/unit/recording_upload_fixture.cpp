@@ -4,6 +4,27 @@
 #include <iostream>
 using namespace harness::observation;
 int main(int argc,char **argv) {
+  // Synthetic-only pipeline soak helper. The Python test owns a loopback mock
+  // and isolated store; this mode never reads device credentials.
+  if(argc==5 && std::string(argv[1])=="--pipeline") {
+    const fs::path store_root=argv[2],sessions=argv[3];
+    try {
+      require(std::string(argv[4]).starts_with("http://127.0.0.1:"),"pipeline fixture requires loopback mock");
+      Store store(store_root);
+      DeviceCredentials credentials{"00000000-0000-4000-8000-000000000001",std::string(64,'0'),argv[4]};
+      ExecutionSampleSpooler spooler(store_root,sessions);
+      const auto deadline=monotonic_ns()+240000000000LL;
+      while(!fs::exists(store_root/"test.stop") && monotonic_ns()<deadline) {
+        const auto profile=store.snapshot_shared();
+        for(const auto &entry:fs::directory_iterator(sessions))
+          if(fs::exists(entry.path()/"session.json"))
+            try{upload_closed_recordings(store_root,entry.path(),credentials,true,false,profile.get());}
+            catch(const std::exception &e){std::cerr<<e.what()<<'\n';}
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      }
+      return 0;
+    }catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
+  }
   if(argc!=2 || !std::string(argv[1]).starts_with("http://127.0.0.1:")) return 2;
   const auto root=fs::temp_directory_path()/("recording-upload-test-"+unique_id());
   try {

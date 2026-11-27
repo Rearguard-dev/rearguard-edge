@@ -385,6 +385,15 @@ void live_test(const fs::path &root) {
   const auto profile = store.snapshot();
   require(profile["candidates"].size() == 1, "candidate not registered");
   const auto c = profile["candidates"].begin().value();
+  for(const auto &topic:observation_topics(config)) {
+    if(topic.value("role","")=="action") continue;
+    const auto &coverage=c.at("window").at("coverage").at(topic.at("name").get<std::string>());
+    require(coverage.at("valid_count").get<Ns>()>=2 &&
+            coverage.at("max_receipt_gap_ns").get<Ns>()<=1000000000LL,
+            "observer processing stall interrupted ROS reception");
+  }
+  require(!read_json(session/"state.json").at("receive_queue").at("overflow").get<bool>(),
+          "live observer receive queue overflowed");
   const auto clip = export_window(session, c["window"], root / "live-export");
   const auto artifact = store.import_artifact(clip, "evidence_mcap");
   store.apply(

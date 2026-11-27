@@ -2,6 +2,7 @@
 #include "recording.hpp"
 #include "evidence.hpp"
 #include "recording_upload.hpp"
+#include "observer_queue.hpp"
 #include <rclcpp/serialization.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
@@ -29,19 +30,32 @@ int main() {
     const Json binding={{"topics",topics},{"joint_order",{"j"}},{"clock","ros_sim"}};
     atomic_json(root/"session.json",{{"config",binding}});
     Recording recording(root,observation_topics(binding));Evidence evidence(binding,"offline-test");
+    ObserverQueue inbox;
+    auto enqueue=[&](const std::string &name,const std::string &type,
+                     std::shared_ptr<const rclcpp::SerializedMessage> data,Ns time,Ns source,Ns monotonic) {
+      inbox.push(data->size(),[time]{return time;},[&,name,type,data,time,source,monotonic]{
+        evidence.tick(time,monotonic);
+        recording.write(name,type,data,time,0);
+        evidence.sample(name,time,source,monotonic);
+      });
+    };
+    // Deliberately block the recording consumer until every packet is received.
+    // The exported MCAP must still contain continuous, correctly stamped data.
     for (Ns i=0;i<=150;++i) {
-      const Ns time=1000000000LL+i*100000000LL;evidence.tick(time,i*100000000LL);
+      const Ns time=1000000000LL+i*100000000LL;
       sensor_msgs::msg::JointState joint;joint.name={"j"};joint.position={static_cast<double>(i)*.001};
       joint.header.stamp.sec=static_cast<int>(time/1000000000LL);joint.header.stamp.nanosec=static_cast<unsigned>(time%1000000000LL);
-      recording.write("/joint","sensor_msgs/msg/JointState",encode(joint),time,0);
-      evidence.sample("/joint",time,time,i*100000000LL);
+      enqueue("/joint","sensor_msgs/msg/JointState",encode(joint),time,time,i*100000000LL);
       sensor_msgs::msg::CompressedImage camera;camera.format="jpeg";camera.data={1,2,3,4};
       const auto source=time-800000000LL;camera.header.stamp.sec=static_cast<int>(source/1000000000LL);
       camera.header.stamp.nanosec=static_cast<unsigned>(source%1000000000LL);
       for (const auto *name:{"/camera/image_raw/compressed","/wrist"}) {
-        recording.write(name,"sensor_msgs/msg/CompressedImage",encode(camera),time,0);
-        evidence.sample(name,time,source,i*100000000LL);
+        enqueue(name,"sensor_msgs/msg/CompressedImage",encode(camera),time,source,i*100000000LL);
       }
+    }
+    require(inbox.status()["queued_messages"]==453,"receive queue lost packets during writer stall");
+    for(int i=0;i<453;++i) {
+      auto task=inbox.pop();require(task.has_value(),"missing recording packet");task->run();
     }
     recording.close();
     auto window=evidence.capture(15.,0.,"unlabeled");window["execution_sample"]={{"max_bytes",64*1024*1024}};

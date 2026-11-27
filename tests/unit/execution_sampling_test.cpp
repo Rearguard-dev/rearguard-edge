@@ -1,4 +1,5 @@
 #include "execution_sampling.hpp"
+#include <algorithm>
 #include <iostream>
 #include <limits>
 using namespace harness::observation;
@@ -32,6 +33,16 @@ void activity(){
   check(operate(first,17).has_value(),"short operation retained with default policy");
   check(first.status()["next_draw_seconds"].get<double>()>=15. &&
         first.status()["next_draw_seconds"].get<double>()<=45.,"default subsequent draw bounded");
+  Fixture short_operation;ExecutionSampler short_sampler(short_operation.root,5);
+  std::optional<Json> short_window;
+  for(int i=0;i<170;++i) {
+    const auto now=static_cast<Ns>(i)*100000000LL;
+    // Ten seconds of actual motion, then live stationary joint observations.
+    short_sampler.joints({static_cast<double>(std::min(i,100))*.01},now);
+    if(auto selected=short_sampler.select(100*second+now,now,20000*86400*second,snapshot(),observation()))
+      short_window=selected;
+  }
+  check(short_window.has_value(),"ten-second operation must be sampled during its live post-motion context");
   // Genuine inactivity resets only scheduling, not the durable reservation count.
   for (int i=170;i<501;++i) {
     const auto now=static_cast<Ns>(i)*100000000LL;

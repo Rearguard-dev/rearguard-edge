@@ -4,6 +4,7 @@
 #include "evidence.hpp"
 #include "recording.hpp"
 #include "execution_sampling.hpp"
+#include "observer_queue.hpp"
 #include "ros_recovery.hpp"
 #include "runtime.hpp"
 #include "events.hpp"
@@ -361,6 +362,9 @@ class Observer {
   std::vector<rclcpp::GenericSubscription::SharedPtr> subscriptions_;
   rclcpp::Subscription<String>::SharedPtr requests_;
   rclcpp::TimerBase::SharedPtr critic_timer_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
+  ObserverQueue inbox_;
+  std::optional<Ns> dispatch_ros_, dispatch_monotonic_;
   std::map<std::string, Ns> counts_, last_wall_, detection_marks_;
   std::map<std::string, std::pair<std::string, Json>> responses_;
   std::deque<std::string> response_order_;
@@ -371,8 +375,9 @@ class Observer {
   std::ofstream journal_;
 
   void event(const std::string &kind, Json value) {
+    const auto receipt=dispatch_ros_.value_or(node_->now().nanoseconds());
     value.update({{"kind", kind},
-                  {"receipt_ros_ns", node_->now().nanoseconds()},
+                  {"receipt_ros_ns", receipt},
                   {"wall_ns", wall_ns()}});
     journal_ << value.dump() << '\n';
     journal_.flush();
@@ -385,7 +390,7 @@ class Observer {
     require(sync_result == 0, "event journal fsync failed");
     auto message = string_message(value);
     writer_->write(prefix_ + "/events", "std_msgs/msg/String",
-                   serialize(message), node_->now().nanoseconds(),
+                   serialize(message), receipt,
                    evidence_.state["epoch"].get<Ns>());
     events_->publish(message);
     const bool failed = kind.find("failed") != std::string::npos ||
@@ -396,7 +401,7 @@ class Observer {
   }
   void tick() {
     const auto old_epoch = evidence_.state["epoch"];
-    evidence_.tick(node_->now().nanoseconds());
+    evidence_.tick(dispatch_ros_.value_or(node_->now().nanoseconds()));
     if (old_epoch != evidence_.state["epoch"]) {
       if (sampler_) sampler_->reset();
       history_.clear();
@@ -436,10 +441,11 @@ class Observer {
         source = result.second;
       } catch (const std::exception &) {
       }
-      evidence_.sample(name, now, source, monotonic_ns(), valid);
+      const auto received=dispatch_monotonic_.value_or(monotonic_ns());
+      evidence_.sample(name, now, source, received, valid);
       if (sampler_ && valid) {
         try {
-          const auto monotonic=monotonic_ns();
+          const auto monotonic=received;
           if (topic.value("role","")=="joint_state" && !source.is_null() && source.get<Ns>()>0 &&
               now-source.get<Ns>()>=-100000000LL && now-source.get<Ns>()<=1000000000LL) {
             sampler_->joints(activity_values,monotonic);
@@ -449,7 +455,7 @@ class Observer {
         } catch (const std::exception &) { /* Sampling must not interrupt observation. */ }
       }
       ++counts_[name];
-      last_wall_[name] = monotonic_ns();
+      last_wall_[name] = received;
     }
     writer_->write(name, type, data, now, evidence_.state["epoch"].get<Ns>());
   }
@@ -573,7 +579,7 @@ class Observer {
                 "execution sampling requires an advancing ROS clock");
         const auto profile_snapshot=store_->snapshot_shared();
         const auto &profile=*profile_snapshot;
-        if (const auto selected=sampler_->select(*evidence_.now,monotonic_ns(),wall_ns(),profile,evidence_.state)) {
+        if (const auto selected=sampler_->select(*evidence_.now,dispatch_monotonic_.value_or(monotonic_ns()),wall_ns(),profile,evidence_.state)) {
           auto &window=evidence_.capture(15.,0.,"Unlabeled execution sample");
           window["execution_sample"]=*selected;
           window["trigger"]="activity_sample";
@@ -642,6 +648,9 @@ class Observer {
     evidence_.state.update({{"heartbeat_wall_ns", wall_ns()},
                             {"receipt_ros_ns", *evidence_.now},
                             {"topics", topics}});
+    evidence_.state["receive_queue"]=inbox_.status();
+    evidence_.state["receive_queue"]["processing_lag_s"]=
+        dispatch_monotonic_?static_cast<double>(monotonic_ns()-*dispatch_monotonic_)/1e9:0.;
     atomic_json(session_ / "state.json", evidence_.state);
     require(fs::space(session_).available >= 250000000,
             "recording stopped: less than 250 MB free space");
@@ -786,11 +795,18 @@ public:
       subscriptions_.push_back(node_->create_generic_subscription(
           name, topic["type"], rclcpp::SensorDataQoS(),
           [this, topic](std::shared_ptr<rclcpp::SerializedMessage> data) {
-            receive(topic, data);
+            inbox_.push(data->size(),[this]{return node_->now().nanoseconds();},
+                        [this,topic,data]{receive(topic,data);});
           }));
     }
     requests_ = node_->create_subscription<String>(
-        prefix_ + "/requests", 10, [this](const String &m) { request(m); });
+        prefix_ + "/requests", 10, [this](const String &m) {
+          inbox_.push(m.data.size(),[this]{return node_->now().nanoseconds();},
+                      [this,m]{request(m);});
+        });
+    status_timer_=node_->create_wall_timer(std::chrono::seconds(1),[this]{
+      inbox_.push(0,[this]{return node_->now().nanoseconds();},[this]{status();},"status");
+    });
     if (profile_critic_ || learned_critic_) {
       double rate = 1;
       if (learned_critic_) rate = physical_critic_?30:10;
@@ -798,12 +814,13 @@ public:
         rate = std::max(rate, head["scope"]["required_hz"].get<double>());
       const auto period = std::chrono::nanoseconds(
           static_cast<Ns>(std::llround(1e9 / std::min(rate, 2000.0))));
-      critic_timer_ = node_->create_wall_timer(period, [this] { critic_tick(); });
+      critic_timer_ = node_->create_wall_timer(period, [this] {
+        inbox_.push(0,[this]{return node_->now().nanoseconds();},[this]{critic_tick();},"critic");
+      });
     }
   }
   void run() {
     const auto started = monotonic_ns();
-    Ns next_status = started;
     std::string termination = "wall_timeout";
     evidence_.state["status"] = "observing";
     try {
@@ -817,13 +834,38 @@ public:
       executor_options.context = context_;
       rclcpp::executors::SingleThreadedExecutor executor(executor_options);
       executor.add_node(node_);
+      // Only enqueue on the ROS thread. In particular, segment finalization,
+      // fsync, profile transactions and candidate registration cannot block DDS.
+      std::exception_ptr receiver_error;
+      std::mutex receiver_error_mutex;
+      std::jthread receiver([&](std::stop_token stop){
+        try {
+          while (!stop.stop_requested() && rclcpp::ok(context_))
+            executor.spin_once(std::chrono::milliseconds(10));
+        } catch (...) {
+          std::lock_guard guard(receiver_error_mutex);
+          receiver_error=std::current_exception();
+        }
+      });
+      // Join before executor/node destruction, including exceptions and timeout.
+      struct StopReceiver {
+        std::jthread &thread;
+        ~StopReceiver(){thread.request_stop();thread.join();}
+      } stop_receiver{receiver};
       while (rclcpp::ok(context_) &&
              static_cast<double>(monotonic_ns() - started) / 1e9 <
                  options_.number("--wall-timeout", 1800)) {
-        executor.spin_once(std::chrono::milliseconds(1));
-        if (monotonic_ns() >= next_status) {
-          status();
-          next_status = monotonic_ns() + 1000000000LL;
+        {
+          std::lock_guard guard(receiver_error_mutex);
+          if(receiver_error) std::rethrow_exception(receiver_error);
+        }
+        if (auto task=inbox_.pop()) {
+          // Never replay overdue inference ticks in a catch-up burst. Raw
+          // observations still retain every received packet and original time.
+          if(task->periodic=="critic" && monotonic_ns()-task->monotonic>100000000LL) continue;
+          dispatch_ros_=task->ros;dispatch_monotonic_=task->monotonic;
+          task->run();
+          dispatch_ros_.reset();dispatch_monotonic_.reset();
         }
       }
       if (!rclcpp::ok(context_))

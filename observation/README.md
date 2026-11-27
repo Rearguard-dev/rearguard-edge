@@ -189,6 +189,34 @@ position targets in configured order. Inference-start/finish telemetry and
 the precise image a VLA consumed require instrumentation at that policy's
 boundary; observing its output and camera topics alone cannot establish them.
 
+ROS callbacks hand serialized messages to a bounded receive queue; recording,
+filesystem synchronization and workflow transactions run on a separate consumer
+thread. Bag and coverage timestamps come from reception, including when disk
+work briefly delays processing. The queue holds at most 64 MiB or 4,096 tasks;
+overflow fails the observer explicitly instead of admitting incomplete evidence.
+`state.json` exposes `receive_queue` occupancy, high-water marks and processing
+lag. Periodic work is coalesced and inference ticks delayed over 100 ms are
+skipped rather than replayed. This absorbs short processing stalls; it does not
+replace coverage checks or guarantee delivery from a best-effort ROS publisher.
+
+For a manual end-to-end stress test, `tests/observer_pipeline_soak.py` runs
+three ten-second motion episodes over 130 seconds on isolated ROS domain 197.
+It uses generated 640×480 JPEGs, the supplied trained bundle in shadow mode,
+a fresh local profile, and a loopback upload mock with a lost completion
+acknowledgement. It never reads real camera pixels or device credentials and
+must never be pointed at the production profile directory as its output root.
+Build `harness_recording_upload_fixture`, compile `tests/slow_status_fsync.c`
+as a shared library
+(`cc -shared -fPIC tests/slow_status_fsync.c -o /tmp/slow-status-fsync.so -ldl`),
+then see the Python script's
+`--help` for explicit input/output paths. Source ROS before running it with a
+Python environment containing rclpy, rosbag2_py, numpy and Pillow. Its report
+records actual exported sample counts, upload acknowledgements, MCAP receive
+gaps, model activity and queue limits. `--min-samples 0` is for measuring the
+old-binary control; the candidate must pass the default three-sample gate.
+Use `--duration 155 --with-candidate` to additionally test candidate registration
+and incident export after the three ordinary sample windows.
+
 Subscriptions use the ROS sensor-data QoS (best effort, volatile) to receive
 ordinary sensor and reliable action publishers without requiring those
 publishers to change. This may drop messages. Coverage is the evidence
