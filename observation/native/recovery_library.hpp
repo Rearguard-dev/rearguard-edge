@@ -4,7 +4,7 @@
 namespace harness::observation {
 
 enum class RecoveryAction { pause_reobserve, retreat_checkpoint,
-                            reset_end_effector, unload_disengage };
+                            reset_end_effector, unload_disengage, halt_until_operator };
 struct RecoveryStage {
   std::string id, capability, implementation_hash, entry, completion;
   RecoveryAction action;
@@ -59,6 +59,7 @@ struct RecoveryLibraryPort {
   // Stage the accepted candidate for the authority coordinator's transfer. This
   // MUST NOT release command exclusion or publish around the authority gate.
   virtual bool commit_candidate(const Json &transaction) = 0;
+  virtual void handback_confirmed(const Json &) {}
   virtual bool cancel(const std::string &reason) = 0;
 };
 
@@ -68,7 +69,7 @@ class LibraryRecoveryController final : public ControllerAdapter {
   RecoveryLibraryPort &port_;
   RecoveryRecipe recipe_;
   enum class State { unprepared, idle, running, completed, preparing, prepared, committed,
-                     returned, failed, held };
+                     returned, failed, held, operator_halt };
   State state_ = State::unprepared;
   Observations observations_;
   double now_ = -1, stage_deadline_ = 0, handback_deadline_ = 0;

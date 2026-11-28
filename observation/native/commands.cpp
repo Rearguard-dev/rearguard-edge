@@ -2,6 +2,9 @@
 #include "store.hpp"
 #include "sync.hpp"
 #include "service.hpp"
+#ifdef HARNESS_WITH_RECOVERY_ROS
+#include "ros_library_recovery.hpp"
+#endif
 #include <iostream>
 namespace harness::observation {
 namespace {
@@ -15,6 +18,16 @@ Json workflow(const Options &o) {
                          o.get("--profile-id")).snapshot();
   }
   Store store(root);
+  if (o.command == "recovery-capabilities") {
+    o.allow("--store");
+#ifdef HARNESS_WITH_RECOVERY_ROS
+    return {{"schema_version", 1}, {"binding_hash", store.snapshot().at("binding_hash")},
+            {"implementations", installed_recovery_implementations("/proc/self/exe")},
+            {"workcell_qualified", false}, {"enforcement_authorized", false}};
+#else
+    throw std::runtime_error("this executable was built without the ROS recovery library");
+#endif
+  }
   if (o.command == "show") {
     o.allow("--store");
     return store.snapshot();

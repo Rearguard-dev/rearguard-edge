@@ -255,7 +255,25 @@ void failure_tests() {
   }
 }
 } // namespace
+void operator_halt_test() {
+  Fixture f;
+  f.manifest["stages"] = Json::array({f.manifest["stages"][0]});
+  f.manifest["stages"][0]["action"] = "halt_until_operator";
+  check(f.prepare(), "terminal operator halt prepares");
+  f.tick(1);
+  check(f.controller.begin(), "operator halt acquires authority");
+  check(f.controller.poll() == "operator_halt", "operator halt has a distinct terminal outcome");
+  check(!f.controller.resume(), "operator halt cannot automatically resume");
+  check(f.controller.hold("operator intervention required"), "coordinator confirms latched hold");
+  f.tick(1000);
+  check(!f.controller.resume() && !f.controller.can_begin(), "elapsed time never releases or rearms hold");
+  check(f.authority.locked, "operator intervention retains authority");
+  Fixture invalid;
+  invalid.manifest["stages"][0]["action"] = "halt_until_operator";
+  rejects([&] { compile_recovery_recipe(invalid.manifest, invalid.binding, invalid.contract); });
+}
 int main() {
+  operator_halt_test();
   try {
     schema_tests(); handback_tests(); failure_tests();
     std::cout << checks << " recovery library checks passed\n";

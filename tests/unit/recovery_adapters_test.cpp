@@ -29,6 +29,8 @@ struct Environment final : RecoveryEnvironment {
   std::set<std::string> owned = {"arm", "tool", "base"};
   bool qualified = true, completion = true, quiet = true;
   unsigned preparations = 0, commits = 0;
+  bool contact_started = false, contact_stopped = false;
+  std::string contact_result = "running";
   bool configure(const RecoveryRecipe &, const Json &, const Json &) override { return qualified; }
   void observe(const Observations &value) override {
     obs = value; state["epoch"] = obs.epoch; state["t_ns"] = obs.receipt_ros_ns;
@@ -43,6 +45,9 @@ struct Environment final : RecoveryEnvironment {
   Json client_acknowledgement() override { return ack; }
   bool validate_candidate(const Json &t, const Json &) override { return t == transaction; }
   bool commit_candidate(const Json &t) override { ++commits; return t == transaction; }
+  bool start_contact(const RecoveryStage &) override { contact_started = true; return true; }
+  std::string poll_contact() override { return contact_result; }
+  bool contact_quiescent() override { return contact_stopped; }
 };
 struct Authority final : ControllerAuthority {
   unsigned acquisitions = 0, releases = 0;
@@ -68,7 +73,7 @@ struct Fixture {
   AdapterRecoveryLibraryPort port;
   Fixture(std::string robot, std::string variant, std::vector<std::string> names)
       : family(std::move(robot)), model(std::move(variant)), joints(std::move(names)),
-        hashes({{"pause_condition_v1", std::string(64, 'a')},
+        hashes({{"qualified_contact_exit_v1", std::string(64, 'f')}, {"operator_halt_v1", std::string(64, 'e')}, {"pause_condition_v1", std::string(64, 'a')},
                 {"moveit_joint_checkpoint_v1", std::string(64, 'b')},
                 {"gripper_gap_v1", std::string(64, 'c')}, {"nav2_pose_checkpoint_v1", std::string(64, 'd')}}),
         port(transport, environment, hashes) {
@@ -278,8 +283,34 @@ void composition_tests() {
   });
 }
 }
+void operator_halt_adapter_tests() {
+  each_arm([](Fixture &f) {
+    f.manifest["stages"] = Json::array();
+    f.add("halt_until_operator", "operator_halt_v1", Json::object());
+    check(f.configure(), "operator halt binds qualified adapter");
+    f.environment.quiet = false;
+    check(!f.port.start(f.recipe.stages[0]), "operator halt requires quiescent environment");
+    f.environment.quiet = true;
+    check(f.port.start(f.recipe.stages[0]), "operator halt starts without motion");
+    check(f.transport.sent.empty(), "operator halt never dispatches arm or base motion");
+    check(f.port.poll() == "succeeded", "adapter acknowledges quiescent stage for library latch");
+  });
+}
 int main() {
   try {
+    each_arm([](Fixture &f) {
+      f.binding["recovery_adapters"]["contact"] = {{"resource", "arm"}, {"procedures", {
+        {"bounded_exit", {{"implementation_hash", std::string(64, '9')}, {"max_force_n", 5}, {"max_distance_m", 0.01}, {"timeout_s", 4}}}}}};
+      f.manifest["stages"] = Json::array();
+      f.add("unload_disengage", "qualified_contact_exit_v1", {{"procedure", "bounded_exit"}, {"max_force_n", 3}, {"max_distance_m", 0.005}});
+      check(f.configure(), "qualified contact procedure binds");
+      check(f.port.start(f.recipe.stages[0]) && f.environment.contact_started, "contact procedure uses measured environment protocol");
+      check(f.transport.sent.empty() && f.port.poll() == "running", "contact exit is not substituted with generic motion");
+      check(!f.port.cancel("test") && !f.port.quiescent(), "contact cancellation needs terminal no-late-work acknowledgement");
+      f.environment.contact_stopped = true;
+      check(f.port.cancel("test"), "settled contact cancellation can confirm hold");
+    });
+    operator_halt_adapter_tests();
     movement_tests(); binding_tests(); cancellation_tests(); tool_and_base_tests(); composition_tests();
     std::cout << checks << " multi-arm recovery adapter checks passed\n"; return 0;
   } catch (const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }

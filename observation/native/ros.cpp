@@ -6,6 +6,9 @@
 #include "execution_sampling.hpp"
 #include "observer_queue.hpp"
 #include "ros_recovery.hpp"
+#ifdef HARNESS_WITH_RECOVERY_ROS
+#include "ros_library_recovery.hpp"
+#endif
 #include "runtime.hpp"
 #include "events.hpp"
 #include "service.hpp"
@@ -353,7 +356,7 @@ class Observer {
   rclcpp::Node::SharedPtr node_;
   rclcpp::Context::SharedPtr context_;
   std::unique_ptr<RosControllerAuthority> authority_;
-  std::unique_ptr<RosTrajectoryRecovery> recovery_executor_;
+  std::unique_ptr<ControllerAdapter> recovery_executor_;
   std::unique_ptr<SwitchingRecoveryController> controller_;
   std::unique_ptr<Runtime> runtime_;
   std::unique_ptr<Recording> writer_;
@@ -747,7 +750,11 @@ public:
         "rearguard_observer_" + id_.substr(0, 8), node_options);
     if (store_) {
       authority_ = std::make_unique<RosControllerAuthority>(context_);
+#ifdef HARNESS_WITH_RECOVERY_ROS
+      recovery_executor_ = make_ros_recovery_executor(context_);
+#else
       recovery_executor_ = std::make_unique<RosTrajectoryRecovery>(context_);
+#endif
       controller_ = std::make_unique<SwitchingRecoveryController>(
           *authority_, *recovery_executor_);
       runtime_ = std::make_unique<Runtime>(*store_, learned_critic_ ? *learned_critic_ : runtime_critic_, *controller_);

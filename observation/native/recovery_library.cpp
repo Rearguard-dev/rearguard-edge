@@ -67,6 +67,10 @@ RecoveryRecipe compile_recovery_recipe(const Json &manifest, const Json &binding
     else if (action == "retreat_checkpoint") s.action = RecoveryAction::retreat_checkpoint;
     else if (action == "reset_end_effector") s.action = RecoveryAction::reset_end_effector;
     else if (action == "unload_disengage") s.action = RecoveryAction::unload_disengage;
+    else if (action == "halt_until_operator") {
+      require(&stage == &stages.back(), "operator halt must be the final stage");
+      s.action = RecoveryAction::halt_until_operator;
+    }
     else throw std::runtime_error("unknown recovery action: " + action);
     s.capability = required_text(stage.at("capability"), "capability");
     s.implementation_hash = required_text(stage.at("implementation_hash"), "implementation_hash");
@@ -179,6 +183,7 @@ bool LibraryRecoveryController::begin() {
   return start_stage();
 }
 std::string LibraryRecoveryController::poll() {
+  if (state_ == State::operator_halt) return "operator_halt";
   if (state_ == State::completed || state_ == State::preparing || state_ == State::prepared)
     return "succeeded";
   if (state_ != State::running) return "failed";
@@ -197,6 +202,13 @@ std::string LibraryRecoveryController::poll() {
   report_["stages"].push_back({{"id", s.id}, {"outcome", "completed"},
                                {"epoch", observations_.epoch},
                                {"t_ns", observations_.receipt_ros_ns}});
+  if (s.action == RecoveryAction::halt_until_operator) {
+    state_ = State::operator_halt;
+    report_["operator_intervention_required"] = true;
+    // The coordinator establishes and confirms the robot-specific latched hold.
+    // Never report success: that would permit automatic handback.
+    return "operator_halt";
+  }
   if (++stage_ < recipe_.stages.size()) return start_stage() ? "running" : "failed";
   state_ = State::completed;
   completed_ns_ = observations_.receipt_ros_ns;
@@ -279,6 +291,7 @@ bool LibraryRecoveryController::resume() {
 }
 void LibraryRecoveryController::handback_confirmed() {
   if (state_ != State::committed) return;
+  port_.handback_confirmed(transaction_);
   state_ = State::returned;
   report_["authority_handback_confirmed"] = true;
 }

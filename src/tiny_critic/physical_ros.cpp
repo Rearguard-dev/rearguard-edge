@@ -1,4 +1,6 @@
 #include "physical.hpp"
+#include "proposition_triggers.hpp"
+#include "physical_authorization.hpp"
 #include "runtime.hpp"
 #include "worker.hpp"
 #include "jpeg.hpp"
@@ -28,14 +30,16 @@ Ns physical_stamp(const builtin_interfaces::msg::Time &stamp) {
 class PhysicalAdapter final:public observation::CriticAdapter {
   PhysicalModel model_;
   Json binding_,selection_,latest_={{"status","warming_up"}};
+  Json approval_;
+  fs::path bundle_;
   std::map<std::string,Json> topics_;
   std::map<std::string,Ns> processed_;
-  Ns epoch_=-1,submitted_=-1,processed_epoch_=-1,last_candidate_=-1,last_result_=-1,origin_=-1;
-  bool positive_=false;
+  Ns epoch_=-1,submitted_=-1,processed_epoch_=-1,last_result_=-1,origin_=-1;
+  PropositionTriggers triggers_;
   std::uint64_t inference_submissions_=0;
   Worker worker_; // Join before destroying models and packet state.
 public:
-  PhysicalAdapter(const fs::path &path,Json binding,Json selection):model_(path,binding,selection),binding_(std::move(binding)),selection_(std::move(selection)) {
+  PhysicalAdapter(const fs::path &path,Json binding,Json selection):model_(path,binding,selection),binding_(std::move(binding)),selection_(std::move(selection)),bundle_(path) {
     require(binding_.value("robot","")==selection_.at("runtime_context").at("embodiment").at("class_id").get<std::string>(),"physical model embodiment differs from live binding");
     for(const auto &topic:binding_.at("topics"))if(topic.value("role","")=="joint_state" || topic.value("role","")=="action")topics_[topic.at("name")]=topic;
     std::size_t states=0,commands=0;
@@ -50,11 +54,45 @@ public:
     }
   }
   bool ready() const override{return true;}
-  bool load(const fs::path &,const Json &,const Json &) override{return false;}
+  void clear_authorization() override { approval_ = nullptr; }
+  bool load(const fs::path &path,const Json &binding,const Json &contract) override {
+    approval_ = nullptr;
+    try {
+      require(binding == binding_, "physical approval binding changed");
+      for (const auto &file : selection_.at("files")) {
+        const auto name = file.at("name").get<std::string>();
+        require(name.find('/') == std::string::npos && name.find('\\') == std::string::npos &&
+                observation::file_hash(bundle_/name) == file.at("sha256").get<std::string>(), "physical model files changed before activation");
+      }
+      approval_ = authorize_physical_critic(observation::read_json(path), selection_, model_.manifest(), binding,
+                                          contract, observation::file_hash(bundle_/"manifest.json"));
+      return true;
+    } catch (...) { return false; }
+  }
+  std::optional<observation::Detection> evaluate_for_enforcement(const observation::Observations &observations) override {
+    if (!approval_.is_object() || latest_.value("status", "") != "valid" || latest_.value<Ns>("epoch", -1) != observations.epoch) return std::nullopt;
+    const auto id = approval_.at("proposition_id").get<std::string>();
+    const auto stamp = latest_.value<Ns>("t_ns", -1);
+    const auto max_age = static_cast<Ns>(model_.manifest().at("preprocessing").at("max_age_s").get<double>() * 1e9);
+    if (stamp < 0 || stamp > observations.receipt_ros_ns || observations.receipt_ros_ns - stamp > max_age || !latest_.at("scores").contains(id)) return std::nullopt;
+    const auto &score = latest_.at("scores").at(id);
+    if (!score.value("valid", false) || !score.at("score").is_number()) return std::nullopt;
+    observation::Detection result{selection_.at("model_id"), id, score.at("score"), 10, 5,
+      "trained_critic", approval_.at("deployment_id"), true};
+    result.proposition_id = id; return result;
+  }
+  Json evaluate_exit(const observation::Observations &observations, const Json &gate) override {
+    const auto current = evaluate_for_enforcement(observations);
+    if (!current || gate.value("kind", "") != "proposition_clear" || gate.value("proposition_id", "") != current->proposition_id) return nullptr;
+    return {{"kind", "recovery_exit"}, {"query_id", gate.at("query_id")}, {"recovery_id", gate.at("recovery_id")},
+      {"deployment_id", approval_.at("deployment_id")}, {"deployment_validated", true}, {"observable", true},
+      {"epoch", observations.epoch}, {"t_ns", latest_.at("t_ns")}, {"score", 1.0-current->confidence},
+      {"score_kind", "uncalibrated_proposition_clear"}};
+  }
   Json telemetry() const override{return latest_;}
   std::optional<observation::Detection> evaluate(const observation::Observations &observations) override {
     const auto now=observations.receipt_ros_ns;
-    if(epoch_!=observations.epoch || now<submitted_){worker_.reset();epoch_=observations.epoch;submitted_=-1;origin_=now;last_result_=-1;last_candidate_=-1;positive_=false;}
+    if(epoch_!=observations.epoch || now<submitted_){worker_.reset();epoch_=observations.epoch;submitted_=-1;origin_=now;last_result_=-1;triggers_.reset();}
     const auto hz=model_.manifest().at("spec").at("decision_hz").get<double>();
     const auto tick=std::floor(static_cast<double>(now-origin_)*hz/1e9);
     const auto anchor=origin_+static_cast<Ns>(std::llround(tick*1e9/hz));
@@ -117,16 +155,18 @@ public:
       latest_["reason"]="no recent observation packets";
     }
     latest_.update({{"inference_submissions",inference_submissions_},{"has_recent_input",recent},{"model_id",selection_.at("model_id")},{"profile_id",selection_.at("profile_id")},
-      {"binding_hash",selection_.at("binding_hash")},{"source","experimental_critic"},{"mode","shadow"},{"calibrated",false},{"enforcement_authorized",false}});
-    if(latest_.value("status","")!="valid"){positive_=false;return std::nullopt;}
+      {"binding_hash",selection_.at("binding_hash")},{"source","experimental_critic"},{"mode","shadow"},{"calibrated",false},
+      {"enforcement_authorized",approval_.is_object()}, {"enforcement_deployment_id",approval_.is_object()?approval_.at("deployment_id"):Json(nullptr)}});
+    if(latest_.value("status","")!="valid")return std::nullopt;
     const Ns result_time=latest_.at("t_ns");if(result_time==last_result_)return std::nullopt;last_result_=result_time;
     for(const auto &[id,score]:latest_.at("scores").items()) {
-      const bool positive=score.value("valid",false) && !score.at("score").is_null() && score.at("score").get<double>()>=.5;
-      const bool rising=positive && !positive_;positive_=positive;
-      if(rising && (last_candidate_<0 || result_time-last_candidate_>=10000000000LL)) {
-        last_candidate_=result_time;const auto model=selection_.at("model_id").get<std::string>();
-        observation::Detection detection{model,id,score.at("score"),10,5,"experimental_critic",model,false};detection.proposition_id=id;return detection;
-      }
+      const bool known=score.value("valid",false) && !score.at("score").is_null();
+      triggers_.update(id,known,known && score.at("score").get<double>()>=.5,result_time);
+    }
+    if (const auto id=triggers_.next(result_time)) {
+      const auto model=selection_.at("model_id").get<std::string>();
+      observation::Detection detection{model,*id,latest_.at("scores").at(*id).at("score").get<double>(),10,5,"experimental_critic",model,false};
+      detection.proposition_id=*id;return detection;
     }
     return std::nullopt;
   }

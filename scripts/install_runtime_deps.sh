@@ -16,6 +16,7 @@ have_runtime() {
       ros-jazzy-rclcpp ros-jazzy-rclcpp-action \
       ros-jazzy-rosbag2-cpp ros-jazzy-rosbag2-storage-mcap \
       ros-jazzy-control-msgs ros-jazzy-controller-manager-msgs \
+      ros-jazzy-moveit-msgs ros-jazzy-nav2-msgs \
       ros-jazzy-sensor-msgs ros-jazzy-std-msgs \
       ros-jazzy-trajectory-msgs ros-jazzy-geometry-msgs \
       ros-jazzy-rosgraph-msgs ros-jazzy-rmw-cyclonedds-cpp libturbojpeg
@@ -61,6 +62,8 @@ sudo apt-get install -y \
   ros-jazzy-rosbag2-storage-mcap \
   ros-jazzy-control-msgs \
   ros-jazzy-controller-manager-msgs \
+  ros-jazzy-moveit-msgs \
+  ros-jazzy-nav2-msgs \
   ros-jazzy-sensor-msgs \
   ros-jazzy-std-msgs \
   ros-jazzy-trajectory-msgs \

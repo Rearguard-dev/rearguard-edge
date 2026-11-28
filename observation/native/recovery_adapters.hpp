@@ -32,6 +32,11 @@ struct RecoveryEnvironment {
   virtual Json client_acknowledgement() = 0;
   virtual bool validate_candidate(const Json &, const Json &) = 0;
   virtual bool commit_candidate(const Json &) = 0;
+  virtual void handback_confirmed(const Json &) {}
+  virtual bool cancel(const std::string &) { return true; }
+  virtual bool start_contact(const RecoveryStage &) { return false; }
+  virtual std::string poll_contact() { return "failed"; }
+  virtual bool contact_quiescent() { return false; }
 };
 
 // Concrete recipe dispatch for MoveIt joint checkpoints, Nav2 pose checkpoints,
@@ -48,9 +53,10 @@ class AdapterRecoveryLibraryPort final : public RecoveryLibraryPort {
   Observations observations_;
   RecoveryRecipe recipe_;
   std::string ticket_, resource_;
-  enum class Phase { idle, paused, planning, executing, succeeded, failed };
+  enum class Phase { idle, paused, contacting, planning, executing, succeeded, failed };
   Phase phase_ = Phase::idle;
   bool configured_ = false, cancelling_ = false;
+  bool contact_active_ = false;
   Ns stage_started_monotonic_ns_ = 0;
   double stage_timeout_s_ = 0;
   bool measured_arm_ready(const Json &) const;
@@ -73,6 +79,7 @@ public:
   Json client_acknowledgement() override;
   bool validate_candidate(const Json &, const Json &) override;
   bool commit_candidate(const Json &) override;
+  void handback_confirmed(const Json &) override;
   bool cancel(const std::string &) override;
 };
 } // namespace harness::observation

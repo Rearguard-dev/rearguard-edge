@@ -33,11 +33,11 @@ AdapterRecoveryLibraryPort::AdapterRecoveryLibraryPort(RecoveryActionTransport &
 
 bool AdapterRecoveryLibraryPort::configure(const RecoveryRecipe &recipe, const Json &binding,
                                           const Json &contract) {
-  if (!ticket_.empty() && !terminal()) return false;
+  if ((!ticket_.empty() || contact_active_) && !terminal()) return false;
   configured_ = false;
   try {
     config_ = binding.at("recovery_adapters");
-    require(exact_keys(config_, {"schema_version", "robot_family", "robot_model", "arm", "moveit", "tool", "nav2"}),
+    require(exact_keys(config_, {"schema_version", "robot_family", "robot_model", "arm", "moveit", "tool", "nav2", "contact"}),
             "unknown recovery adapter binding field");
     require(config_.at("schema_version") == 1, "unsupported adapter binding schema");
     const auto model = required_text(config_.at("robot_model"), "robot_model");
@@ -104,6 +104,18 @@ bool AdapterRecoveryLibraryPort::configure(const RecoveryRecipe &recipe, const J
         require(std::abs(norm - 1) < 1e-6, "invalid checkpoint quaternion");
       }
     }
+    if (config_.contains("contact")) {
+      const auto &contact = config_.at("contact");
+      require(exact_keys(contact, {"resource", "procedures"}) && contact.at("resource") == arm.at("resource") &&
+              contact.at("procedures").is_object() && !contact.at("procedures").empty(), "qualified arm contact procedures required");
+      for (const auto &procedure : contact.at("procedures")) {
+        const auto hash = required_text(procedure.at("implementation_hash"), "contact procedure hash");
+        require(exact_keys(procedure, {"implementation_hash", "max_force_n", "max_distance_m", "timeout_s"}) &&
+                hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == std::string::npos &&
+                number(procedure.at("max_force_n"), 0.001, 10000) && number(procedure.at("max_distance_m"), 0.000001, 1) &&
+                number(procedure.at("timeout_s"), 0.001, 300), "invalid contact procedure envelope");
+      }
+    }
     recipe_ = recipe;
     resources_.clear();
     for (const auto &stage : recipe.stages) {
@@ -122,6 +134,8 @@ bool AdapterRecoveryLibraryPort::configure(const RecoveryRecipe &recipe, const J
 bool AdapterRecoveryLibraryPort::validate_stage(const RecoveryStage &stage) const {
   if (!implementations_.contains(stage.capability) || implementations_.at(stage.capability) != stage.implementation_hash) return false;
   const auto &p = stage.parameters;
+  if (stage.action == RecoveryAction::halt_until_operator)
+    return stage.capability == "operator_halt_v1" && p.is_object() && p.empty();
   if (stage.action == RecoveryAction::pause_reobserve)
     return stage.capability == "pause_condition_v1" && p.is_object() && p.empty();
   if (stage.action == RecoveryAction::retreat_checkpoint) {
@@ -143,6 +157,13 @@ bool AdapterRecoveryLibraryPort::validate_stage(const RecoveryStage &stage) cons
         number(p.at("gap_m"), tool.at("min_gap"), tool.at("max_gap")) &&
         number(p.at("max_effort_n"), 0.001, tool.at("max_effort")) &&
         transport_.available(RecoveryBackend::gripper_gap, tool.at("action"));
+  }
+  if (stage.action == RecoveryAction::unload_disengage && stage.capability == "qualified_contact_exit_v1" && config_.contains("contact")) {
+    if (!exact_keys(p, {"procedure", "max_force_n", "max_distance_m"}) || !p.contains("procedure") || !p.at("procedure").is_string() ||
+        !config_.at("contact").at("procedures").contains(p.at("procedure").get<std::string>())) return false;
+    const auto &limits = config_.at("contact").at("procedures").at(p.at("procedure").get<std::string>());
+    return number(p.at("max_force_n"), 0.001, limits.at("max_force_n")) &&
+        number(p.at("max_distance_m"), 0.000001, limits.at("max_distance_m")) && stage.timeout_s <= limits.at("timeout_s").get<double>();
   }
   // No generic force-controlled disengagement or vendor-tool reset fallback.
   return false;
@@ -177,7 +198,12 @@ bool AdapterRecoveryLibraryPort::start(const RecoveryStage &stage) {
   stage_timeout_s_ = stage.timeout_s;
   current_stage_ = {{"id", stage.id}, {"capability", stage.capability}, {"parameters", stage.parameters}};
   ticket_.clear();
-  if (stage.capability == "pause_condition_v1") {
+  if (stage.capability == "qualified_contact_exit_v1") {
+    resource_ = config_.at("arm").at("resource");
+    if (!environment_.start_contact(stage)) return false;
+    contact_active_ = true; phase_ = Phase::contacting; return true;
+  }
+  if (stage.capability == "pause_condition_v1" || stage.capability == "operator_halt_v1") {
     resource_ = config_.at("arm").at("resource");
     if (!environment_.owns(resource_) || !environment_.quiescent()) return false;
     phase_ = Phase::paused; return true;
@@ -250,6 +276,10 @@ bool AdapterRecoveryLibraryPort::validate_plan(const Json &result) const {
   return true;
 }
 bool AdapterRecoveryLibraryPort::terminal() {
+  if (contact_active_) {
+    if (!environment_.contact_quiescent()) return false;
+    contact_active_ = false;
+  }
   if (ticket_.empty()) return true;
   return transport_.poll(ticket_).state != ActionState::pending;
 }
@@ -262,8 +292,14 @@ std::string AdapterRecoveryLibraryPort::poll() {
   if (!configured_ || cancelling_) return "failed";
   if (phase_ == Phase::paused) return resources_owned() && environment_.quiescent() ? "succeeded" : "failed";
   if (phase_ == Phase::idle || phase_ == Phase::failed) return "failed";
-  if (!resources_owned()) { transport_.cancel(ticket_); phase_ = Phase::failed; return "failed"; }
+  if (!resources_owned()) { if (!ticket_.empty()) transport_.cancel(ticket_); phase_ = Phase::failed; return "failed"; }
   if (phase_ == Phase::succeeded) return "succeeded";
+  if (phase_ == Phase::contacting) {
+    const auto outcome = environment_.poll_contact();
+    if (outcome == "succeeded" && terminal()) { phase_ = Phase::succeeded; return outcome; }
+    if (outcome == "running") return outcome;
+    phase_ = Phase::failed; return "failed";
+  }
   try {
     const auto reply = transport_.poll(ticket_);
     if (reply.state == ActionState::pending) return "running";
@@ -294,9 +330,11 @@ bool AdapterRecoveryLibraryPort::prepare_client(const Json &t, const Json &r) { 
 Json AdapterRecoveryLibraryPort::client_acknowledgement() { return environment_.client_acknowledgement(); }
 bool AdapterRecoveryLibraryPort::validate_candidate(const Json &t, const Json &c) { return quiescent() && environment_.validate_candidate(t, c); }
 bool AdapterRecoveryLibraryPort::commit_candidate(const Json &t) { return quiescent() && environment_.commit_candidate(t); }
-bool AdapterRecoveryLibraryPort::cancel(const std::string &) {
+void AdapterRecoveryLibraryPort::handback_confirmed(const Json &t) { environment_.handback_confirmed(t); }
+bool AdapterRecoveryLibraryPort::cancel(const std::string &reason) {
   cancelling_ = true;
   if (!ticket_.empty() && !terminal()) transport_.cancel(ticket_);
-  return terminal() && environment_.quiescent();
+  const bool client_cancelled = environment_.cancel(reason);
+  return terminal() && environment_.quiescent() && client_cancelled;
 }
 } // namespace harness::observation

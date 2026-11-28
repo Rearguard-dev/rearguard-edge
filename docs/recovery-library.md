@@ -7,10 +7,11 @@ This is the first implementation layer of
 It adds the portable recipe compiler/executor and integrates asynchronous handback
 preparation into the existing runtime and authority coordinator. Concrete
 MoveIt/Nav2/gripper dispatch and an opt-in ROS action transport are now implemented;
-see [adapter development and tests](recovery-adapters.md). The existing ROS
-trajectory adapter remains the live observer's default executor. New adapters
-are not automatically registered for live enforcement; they require the exact
-robot/tool/client integration and commissioning described below.
+see [adapter development and tests](recovery-adapters.md). The live observer
+selects the library for explicit library artifacts and the trajectory executor
+for legacy policies. The native ROS environment and packaged policy gate are
+described in [recovery-integration.md](recovery-integration.md). Exact workcell
+bindings, validation and commissioning remain required before enforcement.
 
 ## Existing components
 
@@ -170,14 +171,15 @@ the next insertion, grasp or fastening attempt.
 
 Before enabling this library in the live ROS observer:
 
-1. Implement and qualify the `RecoveryLibraryPort` for the selected workcell,
-   including MoveIt/Nav2 and tool/contact capabilities actually supported there.
-2. Implement the client's gated preparation/acknowledgement and stale-command
-   invalidation protocol, including physical ownership of independently active
-   tools. Bind implementation versions/resources to the approved configuration.
-3. Add explicit executor selection in the observer and recipe submission/review
-   through the store/backend. Retain the existing trajectory path for legacy
-   deployments; never silently treat a recipe as a legacy generated policy.
+1. Configure and qualify the native environment with the selected workcell's
+   scene, payload and physical predicates, plus supported MoveIt/Nav2/tool/contact
+   capabilities.
+2. Connect the packaged policy gate at the sole nominal output, including policy
+   queue invalidation/reset and ownership of independently active tools. Bind
+   implementation versions and resource claims to the approved configuration.
+3. Submit and review the exact recipe/model reference through the existing store
+   approval flow. Executor selection is explicit; a refused library recipe never
+   falls back to a legacy generated policy.
 4. Run ROS fault integration, simulation and physical commissioning. Validate
    cancellation, late callbacks, partial switches, process death, watchdogs and
    the actual command available at authority transfer.
@@ -191,3 +193,19 @@ Validation on 22 November 2026: a fresh macOS build with ROS 2, ONNX and TensorR
 disabled passed all 17 native CTest tests, including 189 recovery-library checks.
 The recording/upload HTTP test required localhost socket permission outside the
 sandbox. The build used the repository's normal warning-as-error settings.
+
+## Explicit operator halt (28 November 2026)
+
+The fifth action, `halt_until_operator`, is allowed only as the final stage. Its
+entry and measured completion checks remain bounded. Once those pass, the
+executor returns `operator_halt`, never ordinary success. Runtime invokes the
+coordinator's robot-specific hold and records either `held` or
+`fault_unconfirmed_hold`; it does not evaluate automatic handback for this result.
+Neither elapsed time nor a later cleared critic signal releases this latch.
+The concrete adapter capability is `operator_halt_v1` with empty parameters and
+requires the bound environment's quiescent hold. This does not implement a remote
+operator-release protocol or replace the independent robot watchdog.
+
+Profile authoring exposes all five action identities as drafts. Selecting one
+is not recipe compilation or activation. Existing exact binding, validation,
+approval and commissioning requirements still apply, including to operator halt.

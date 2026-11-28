@@ -44,9 +44,18 @@ Json Runtime::activate() {
                         .value("proposition_id", "");
   validate_authorization(s);
   const auto &content = b["content"];
+  bool activated = false;
+  struct ActivationGuard {
+    CriticAdapter &critic; bool &activated; std::string &status;
+    ~ActivationGuard() { if (!activated) { critic.clear_authorization(); status = "blocked"; } }
+  } activation_guard{critic_, activated, status};
+  auto critic_contract = content["contract"];
+  critic_contract["runtime_activation"] = {{"deployment_id", deployment_id_},
+      {"proposition_id", proposition_id_}, {"profile_id", s.at("profile_id")},
+      {"binding_hash", s.at("binding_hash")}, {"content_hash", deployment_content_hash_}};
   require(
       critic_.load(store_.verify_artifact(content["critic"], "critic_model"),
-                   s["binding"], content["contract"]),
+                   s["binding"], critic_contract),
       "critic adapter refused deployment");
   require(controller_.prepare(
               store_.verify_artifact(content["recovery"], "recovery_model"),
@@ -70,14 +79,17 @@ Json Runtime::activate() {
   last_match_ = false;
   authority_requested_ = false;
   status = "nominal";
+  activated = true;
   return snapshot();
 }
 Json Runtime::snapshot() const {
   return {{"status", status},
+          {"profile_revision", store_.snapshot_shared()->at("revision")},
           {"deployment_id", deployment_id_},
           {"proposition_id", proposition_id_},
           {"critic_ready", critic_.ready()},
           {"controller_ready", controller_.ready()},
+          {"authority_retained", authority_requested_},
           {"recovery", controller_.telemetry()},
           {"recovery_episode_id", recovery_episode_id_},
           {"enforcement_event_id", enforcement_event_id_.empty()
@@ -140,6 +152,7 @@ Json Runtime::deactivate() {
       return result;
   }
   status = "disabled";
+  critic_.clear_authorization();
   deployment_id_ = nullptr;
   failure_id_ = nullptr;
   deployment_content_hash_.clear();
@@ -165,6 +178,8 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
         return fallback("recovery timeout");
       // Keep checking ownership while waiting for exit evidence/client readiness.
       const auto outcome = controller_.poll();
+      if (outcome == "operator_halt")
+        return fallback("operator intervention required");
       if (outcome != "running" && outcome != "succeeded" && outcome != "failed")
         return fallback("invalid controller response");
       if (outcome == "succeeded") controller_completed_ = true;
@@ -218,7 +233,7 @@ Json Runtime::step(const Observations &observations, double now, bool fresh) {
       }
       return nullptr;
     }
-    const auto detection = critic_.evaluate(observations);
+    const auto detection = critic_.evaluate_for_enforcement(observations);
     if (detection && (!std::isfinite(detection->confidence) ||
                       detection->confidence < 0 || detection->confidence > 1))
       return fallback("invalid critic confidence");

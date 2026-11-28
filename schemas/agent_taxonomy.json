@@ -87,6 +87,7 @@
     }
   },
   "flows": {
+    "reliability_review": {"description": "Explain independent critic evaluation, calibration, operating points, and existing recovery mappings. Read only.", "entry_step": "assessment", "steps": {"assessment": {"opening": "Summarize the published evaluation scope and measured results. Explicitly distinguish synthetic evidence, missing measurements, and recovery mappings from authorization. Never invent metrics or infer performance from incident counts.", "opening_artifacts": ["reliability_decisions", "reliability_calibration", "reliability_performance"], "actions": {"question": {"description": "Explain the latest measured evaluation and its limitations.", "handler": "get_reliability_report", "artifacts": ["reliability_decisions", "reliability_calibration", "reliability_performance"]}, "refresh_assessment": {"description": "Read the latest published assessment without starting training or changing the critic.", "suggested_reply": "Update assessment", "handler": "get_reliability_report", "artifacts": ["reliability_decisions", "reliability_calibration", "reliability_performance"]}}}}},
     "harness_configuration": {
       "description": "Connect a robot, configure its task, and browse, add or edit failure/recovery propositions from the library.",
       "entry_step": "connect",
@@ -363,6 +364,7 @@
     "get_account_billing": { "description": "Show the authenticated user's preformatted billing summary without changing the harness workflow.", "handler": "get_account_billing", "artifacts": ["account_billing"] }
   },
   "handlers": {
+    "get_reliability_report": {"kind": "read", "description": "Read the authenticated profile’s model-bound independent evaluation. No thresholds, recoveries, deployments or training are changed.", "requires": ["authorization.user"]},
     "get_account_billing": { "kind": "read", "description": "Read only the authenticated account's plan, usage, balance, and billing management availability. Never explain or invent charges.", "requires": ["authorization.user"] },
     "browse_propositions": {"kind": "read", "description": "Suggest library templates or list saved profile propositions.", "requires": ["domain.profile_id"]},
     "add_proposition": {"kind": "capture", "description": "Add a library template by its exact ID. Value must be the template ID.", "requires": ["domain.profile_id"]},
@@ -414,6 +416,9 @@
     "unavailable": { "kind": "input_gate", "description": "Report that a declared product capability is not implemented.", "requires": [] }
   },
   "artifacts": {
+    "reliability_decisions": {"label": "Decision levels & recovery mappings", "renderer": "reliability_decisions", "surface": "canvas"},
+    "reliability_calibration": {"label": "Calibration & operating point", "renderer": "reliability_calibration", "surface": "canvas"},
+    "reliability_performance": {"label": "Performance summary", "renderer": "reliability_performance", "surface": "canvas"},
     "account_billing": { "label": "Billing", "renderer": "billing_card", "surface": "chat" },
     "proposition_library": {"label": "Suggested failure propositions", "renderer": "proposition_library", "surface": "chat"},
     "profile_propositions": {"label": "Your failure propositions", "renderer": "profile_propositions", "surface": "chat"},

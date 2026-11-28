@@ -67,7 +67,9 @@ are `so101/so101` and `agilex_piper/piper`. Unknown fields are rejected.
 predicate and checkpoint, validate resource ownership/gating, calibration, scene
 and payload synchronization with MoveIt/Nav2, client protocol and any remote
 artifacts. It must reject unsupported vendor drivers or direct-command bypasses.
-No concrete environment for a physical workcell is provided in this change.
+The native ROS channel environment and policy command gate are provided in
+[recovery-integration.md](recovery-integration.md). A workcell provider connects
+its actual scene, payload, contact and tool facts to that protocol.
 
 The environment supplies fresh measured arm positions/velocities, epoch/receipt
 time, scene revision, disengagement and payload-model state. It must map measured
@@ -109,8 +111,10 @@ predicates and handback readiness remain mandatory afterward.
 
 This implements a normalized gripper action client. It does not invent a gap
 conversion for either stock driver or implement arbitrary spindle/vacuum resets.
-Those need their own qualified device adapter. `unload_disengage` is rejected;
-there is no generic force-controlled or fastening reversal procedure.
+Those need their own qualified device adapter. `unload_disengage` requires the
+explicit `qualified_contact_exit_v1` protocol described in
+[recovery-integration.md](recovery-integration.md); it is rejected without an exact
+procedure binding, advertised implementation identity and measured feedback.
 
 ### Nav2 checkpoint
 
@@ -201,3 +205,19 @@ Validation recorded on 22 November 2026:
 - [FollowJointTrajectory](https://github.com/ros-controls/control_msgs/blob/jazzy/control_msgs/action/FollowJointTrajectory.action)
 - [GripperCommand](https://github.com/ros-controls/control_msgs/blob/jazzy/control_msgs/action/GripperCommand.action)
 - [NavigateToPose](https://github.com/ros-navigation/navigation2/blob/jazzy/nav2_msgs/action/NavigateToPose.action)
+
+
+Validation recorded on 28 November 2026:
+
+- A secret-free isolated Ubuntu/Jazzy Modal build compiled the ROS-enabled
+  observer, physical critic adapter and optional MoveIt/Nav2 transport.
+- Library, adapter and ROS mock action-server suites all passed (3/3), including
+  the operator-halt extension. These are typed DDS protocol tests with mock
+  servers; no physical robot, actual planner or workcell commissioning was used.
+- Independent proposition-trigger tests passed locally. The updated edge code
+  has not been published or installed on the operator's machine.
+
+The normal ROS-enabled release path now builds this transport too, including its
+mock-server tests in normal and sanitizer checks. `install_runtime_deps.sh` checks
+and installs `ros-jazzy-moveit-msgs` and `ros-jazzy-nav2-msgs`; this supplies the
+protocol libraries, not live planning servers or a commissioned workcell.

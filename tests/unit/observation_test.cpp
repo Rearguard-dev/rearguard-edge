@@ -5,6 +5,7 @@
 #include "runtime.hpp"
 #include "controller_handover.hpp"
 #include "sync.hpp"
+#include "service.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -194,15 +195,23 @@ void binding_tests() {
 }
 struct FakeCritic final : CriticAdapter {
   bool exit_observable = true;
+  bool consume_monitor = false, monitor_consumed = false;
+  int authorization_clears = 0;
+  Json loaded_contract;
   double exit_score = 1;
   std::optional<Detection> detection = Detection{"tiny", "target_moved", 0.9};
   bool ready() const override { return true; }
-  bool load(const fs::path &, const Json &, const Json &) override {
+  bool load(const fs::path &, const Json &, const Json &contract) override {
+    loaded_contract = contract;
     return true;
   }
   std::optional<Detection> evaluate(const Observations &) override {
+    if (consume_monitor && monitor_consumed) return std::nullopt;
+    monitor_consumed = true;
     return detection;
   }
+  std::optional<Detection> evaluate_for_enforcement(const Observations &) override { return detection; }
+  void clear_authorization() override { ++authorization_clears; }
   Json evaluate_exit(const Observations &observations, const Json &gate) override {
     return {{"kind", "recovery_exit"}, {"query_id", gate["query_id"]},
             {"recovery_id", gate["recovery_id"]}, {"deployment_validated", true},
@@ -213,7 +222,7 @@ struct FakeCritic final : CriticAdapter {
 };
 struct FakeController final : ControllerAdapter {
   std::string outcome = "running";
-  bool hold_ack = true, begin_ack = true, resume_ack = true;
+  bool hold_ack = true, begin_ack = true, resume_ack = true, prepare_ack = true;
   int prepares = 0, begins = 0, holds = 0;
   int resumes = 0;
   Handback handback = Handback::ready;
@@ -221,7 +230,7 @@ struct FakeController final : ControllerAdapter {
   bool ready() const override { return true; }
   bool prepare(const fs::path &, const Json &, const Json &) override {
     ++prepares;
-    return true;
+    return prepare_ack;
   }
   bool begin() override { ++begins; return begin_ack; }
   std::string poll() override { return outcome; }
@@ -965,6 +974,54 @@ void runtime_handback_failure_tests() {
           "failed readiness, ownership loss, timeout or revoked approval forbids handback");
   }
 }
+void runtime_operator_halt_tests() {
+  Fixture f;
+  const auto deployment = f.deploy(true);
+  FakeCritic critic;
+  FakeController controller;
+  Runtime runtime(f.store, critic, controller);
+  critic.detection->deployment_id = deployment["id"];
+  critic.detection->deployment_validated = true;
+  critic.detection->proposition_id = "target_moved";
+  runtime.activate();
+  runtime.step({}, 0);
+  controller.outcome = "operator_halt";
+  const auto result = runtime.step({}, 0.1);
+  check(result["reason"] == "operator intervention required" && runtime.status == "held",
+        "explicit operator halt uses confirmed fallback authority");
+  controller.outcome = "succeeded";
+  check(runtime.step({}, 1000).is_null() && controller.resumes == 0 && controller.holds == 1,
+        "later success and elapsed time cannot release operator halt");
+}
+void runtime_activation_rollback_tests() {
+  for (const bool prepares : {false, true}) {
+    Fixture f; f.deploy(true);
+    FakeCritic critic; FakeController controller; controller.prepare_ack = prepares;
+    Runtime runtime(f.store, critic, controller);
+    if (prepares) { runtime.activate(); runtime.deactivate(); }
+    else { rejects([&] { runtime.activate(); }, "controller adapter refused"); check(runtime.status == "blocked", "failed activation remains blocked"); }
+    check(critic.authorization_clears == 1 && controller.begins == 0 && controller.holds == 0,
+          "failed activation or disarming clears critic authority without actuator intervention");
+  }
+}
+void critic_reconfiguration_tests() {
+  Json profile = {{"installed_deployment", nullptr}, {"revision", 1}};
+  Json state = {{"runtime", {{"status", "disabled"}, {"authority_retained", false}, {"profile_revision", 1}}}};
+  check(critic_reconfiguration_allowed(profile, state), "passive observation can adopt next model");
+  for (const auto *status : {"nominal", "recovering", "held", "fault_unconfirmed_hold"}) {
+    state["runtime"]["status"] = status;
+    check(!critic_reconfiguration_allowed(profile, state), "model switch cannot interrupt armed or retained recovery");
+  }
+  state["runtime"]["status"] = "disabled";
+  state["runtime"]["authority_retained"] = true;
+  check(!critic_reconfiguration_allowed(profile, state), "disarmed fallback still retains authority");
+  state["runtime"]["authority_retained"] = false; profile["installed_deployment"] = "approved";
+  check(!critic_reconfiguration_allowed(profile, state), "installed recovery pins observer model generation");
+  profile["installed_deployment"] = nullptr;
+  profile["revision"] = 2;
+  check(!critic_reconfiguration_allowed(profile, state), "stale pre-deactivation snapshot cannot authorize model switch");
+  check(!critic_reconfiguration_allowed(profile, Json::object()), "unknown runtime receipt defers model switch");
+}
 void runtime_tests() {
   Fixture f;
   const auto deployment = f.deploy(true);
@@ -975,6 +1032,10 @@ void runtime_tests() {
   critic.detection->deployment_validated = true;
   critic.detection->proposition_id = "target_moved";
   r.activate();
+  check(critic.loaded_contract.at("runtime_activation").at("deployment_id") == deployment.at("id"),
+        "critic activation binds approved deployment identity");
+  critic.consume_monitor = true;
+  check(critic.evaluate({}).has_value() && !critic.evaluate({}), "monitor notification is consumed once");
   check(r.step({}, 0)["kind"] == "recovery_started", "recovery begins");
   const auto started = f.store.pending_enforcements();
   check(started.size() == 1 && started[0]["outcome"] == "unknown",
@@ -1062,6 +1123,9 @@ int main() {
     authorization_tests();
     authorized_handover_test();
     runtime_handback_failure_tests();
+    runtime_operator_halt_tests();
+    runtime_activation_rollback_tests();
+    critic_reconfiguration_tests();
     runtime_tests();
     std::cout << checks << " native observation/workflow checks passed\n";
     return 0;

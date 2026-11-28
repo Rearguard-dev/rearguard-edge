@@ -200,6 +200,7 @@ void export_pending_windows(const fs::path &store, const fs::path &session,const
   Ns next_assignment = 0, next_scan = monotonic_ns() + 30000000000LL;
   fs::path active_session;
   std::string active_critic_id;
+  std::optional<std::string> deferred_critic_id;
   std::map<fs::path,Store> stores;
   while (!service_stopping) {
     reap(observer_pid, "observer");
@@ -326,7 +327,16 @@ void export_pending_windows(const fs::path &store, const fs::path &session,const
           critic.is_object() && critic.value("executable", false)
               ? critic.value("id", "")
               : "";
-      if (observer_pid > 0 && critic_id != active_critic_id) {
+      const bool critic_update_pending = observer_pid > 0 && critic_id != active_critic_id;
+      const bool critic_update_deferred = critic_update_pending &&
+          !critic_reconfiguration_allowed(profile, load_or_empty(active_session / "state.json"));
+      if (critic_update_deferred && (!deferred_critic_id || *deferred_critic_id != critic_id)) {
+        deferred_critic_id = critic_id;
+        record_event("critic", "update_deferred", "success", {{"running_generation", active_critic_id},
+          {"desired_generation", critic_id}, {"reason", "Disarm enforcement and resolve retained recovery authority before changing the observer model."}});
+      }
+      if (!critic_update_deferred) deferred_critic_id.reset();
+      if (critic_update_pending && !critic_update_deferred) {
         ::kill(observer_pid, SIGTERM);
         wait_child(observer_pid);
         observer_pid = -1;
@@ -390,13 +400,22 @@ void export_pending_windows(const fs::path &store, const fs::path &session,const
         physical_runtime.value("binding_hash","")==profile.value("binding_hash","") &&
         physical_runtime.value("observed_wall_ns",Ns(0))<=wall_ns() &&
         wall_ns()-physical_runtime.value("observed_wall_ns",Ns(0))<=90000000000LL;
+      const bool retained_runtime = critic_update_deferred && physical_runtime.is_object() &&
+        !physical_runtime.value("model_id", "").empty() &&
+        active_critic_id.starts_with(physical_runtime.value("model_id", "") + ":") &&
+        physical_runtime.value("binding_hash", "") == profile.value("binding_hash", "") &&
+        physical_runtime.value<Ns>("observed_wall_ns", 0) <= wall_ns() &&
+        wall_ns()-physical_runtime.value<Ns>("observed_wall_ns", 0) <= 90000000000LL;
       write_status("running", config, {{"domain_id", *domain},
                    {"physical_model",load_or_empty(store/"models"/"status.json")},
-                   {"physical_runtime",current_runtime?physical_runtime:Json(nullptr)},
+                   {"physical_runtime",(current_runtime || retained_runtime)?physical_runtime:Json(nullptr)},
+                   {"critic_update_deferred", critic_update_deferred},
+                   {"running_critic_generation", active_critic_id},
                    {"store", store.string()}, {"session", active_session.string()},
                    {"critic", critic},
                    {"critic_profile_ready", physical_ready || profile.value("critic_profile_ready", false)},
                    {"critic_runtime_status",
+                    critic_update_deferred ? "update_deferred" :
                     physical_ready ? (current_runtime?physical_runtime.value("status","model_loading"):"model_loading") :
                     profile.value("critic_runtime_status", "awaiting_profile_setup")}});
     }

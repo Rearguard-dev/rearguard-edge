@@ -53,8 +53,12 @@ struct CriticAdapter {
   virtual bool ready() const = 0;
   virtual bool load(const fs::path &, const Json &, const Json &) = 0;
   virtual std::optional<Detection> evaluate(const Observations &) = 0;
+  // Monitoring may consume an edge-triggered incident notification. Enforcement
+  // reads the same current judgment without consuming another incident edge.
+  virtual std::optional<Detection> evaluate_for_enforcement(const Observations &v) { return evaluate(v); }
   virtual Json telemetry() const { return nullptr; }
   virtual Json evaluate_exit(const Observations &, const Json &) { return nullptr; }
+  virtual void clear_authorization() {}
 };
 struct ControllerAdapter {
   virtual ~ControllerAdapter() = default;

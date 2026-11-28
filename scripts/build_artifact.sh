@@ -22,6 +22,9 @@ cd "$(dirname "$0")/.."
 VERSION="${1:?usage: build_artifact.sh <version>}"
 WITH_ROS2="${HARNESS_WITH_ROS2:-OFF}"
 WITH_ONNX="${HARNESS_WITH_ONNX:-OFF}"
+WITH_RECOVERY_ROS="${HARNESS_WITH_RECOVERY_ROS:-$WITH_ROS2}"
+BUILD_JOBS="${HARNESS_BUILD_JOBS:-2}"
+case "$BUILD_JOBS" in ''|*[!0-9]*|0) echo "ERROR: HARNESS_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac
 # Must match install.sh's TARGET computation exactly (see the comment there) —
 # any drift here is a manifest/tarball 404 on install.
 if [ -z "${TARGET:-}" ]; then
@@ -65,8 +68,9 @@ cmake -S . -B "$BUILD" $GEN \
   -DHARNESS_VERSION="$VERSION" \
   -DHARNESS_WITH_ROS2="$WITH_ROS2" \
   -DHARNESS_WITH_ONNX="$WITH_ONNX" \
+  -DHARNESS_WITH_RECOVERY_ROS="$WITH_RECOVERY_ROS" \
   -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE"
-cmake --build "$BUILD" --parallel
+cmake --build "$BUILD" --parallel "$BUILD_JOBS"
 
 echo "== test"
 # A kernel that fails its own tests must never be published. The sanitizer pass
@@ -78,8 +82,9 @@ echo "== sanitizers"
 cmake -S . -B "$BUILD-san" $GEN -DCMAKE_BUILD_TYPE=Debug \
   -DHARNESS_VERSION="$VERSION" -DHARNESS_WITH_ROS2="$WITH_ROS2" \
   -DHARNESS_WITH_ONNX="$WITH_ONNX" \
+  -DHARNESS_WITH_RECOVERY_ROS="$WITH_RECOVERY_ROS" \
   -DHARNESS_SANITIZE=ON > /dev/null
-cmake --build "$BUILD-san" --parallel > /dev/null
+cmake --build "$BUILD-san" --parallel "$BUILD_JOBS" > /dev/null
 (cd "$BUILD-san" && ASAN_OPTIONS=detect_leaks=0 ctest --output-on-failure)
 rm -rf "$BUILD-san"
 
